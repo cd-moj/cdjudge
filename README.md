@@ -1,0 +1,145 @@
+# cd-moj — Repositório do JUIZ
+
+Código que roda **nas máquinas de julgamento** (não tem server/web). Uma máquina de
+juiz clona **só este repo** + o **mojtools** (sandbox), monta os **problemas via NFS**,
+e sobe o **agente** (`moj-agent`), que se conecta à API do MOJ e **puxa jobs no
+heartbeat** (modelo pull — sem porta de entrada, sem `nc`, sem poll-storm).
+
+## Os três repositórios (separados de propósito)
+
+| Repo | Caminho (dev) | Caminho (deploy) | O que é |
+|---|---|---|---|
+| **moj** (`cdmoj.git`) | `~/moj` | host web | Plataforma: `server/` (API bash) + `web/` (frontend) + `docs/`. **O juiz NÃO precisa.** |
+| **mojtools** (`mojtools.git`) | `~/moj/mojtools` | `/home/prof/mojtools` | Sandbox/julgamento: `build-and-test.sh`, `cage-run.sh`, `gen-report.sh`, `calibreitor.sh`, `lang/`. |
+| **judge** (este, `cdjudge.git`) | `~/moj/judge` | `/home/prof/judge` | Agente + daemons do juiz. |
+
+> Os três são repos git independentes. No checkout de dev, `mojtools/` e `judge/`
+> ficam aninhados em `~/moj/` mas são **gitignored** pelo moj (têm `.git` próprio).
+> **Problemas** são repos/submódulos próprios, montados via **NFS** — nunca versionados aqui.
+
+## Layout deste repo
+
+```
+judge/
+├── agent/                  # AGENTE (modelo pull) — o que se usa daqui pra frente
+│   ├── moj-agent.sh        #   loop: register → heartbeat → (puxa job) → julga → POST result
+│   └── inventory.sh        #   coleta specs (CPU/mem/GPU) + inventário de problemas
+├── update-problems.sh      # git pull + make nos repos de problema (NFS)
+├── judge/                  # LEGADO (em retirada): root-daemon*, job-receiveitor* (listeners nc)
+├── sistema_escalonador/    # LEGADO (em retirada): master tcpserver + escalonador.sh
+├── etc/agent.env.sample    # modelo de config do agente (copie p/ etc/agent.env)
+└── problems/               # (gitignored) árvore de problemas — montar via NFS
+```
+
+A migração do legado p/ o pull e a aposentadoria estão em **`server/judge-gw/PULL.md`** (repo moj).
+
+## Pré-requisitos por máquina
+
+`bash`, `jq`, `curl`, `git`, **`bubblewrap` (`bwrap`)** (sandbox), `/usr/bin/time`, e os
+compiladores/runtimes das linguagens que a máquina vai julgar (gcc/g++, python3, openjdk, …).
+Máquinas **GPU**: `nvidia-smi` (a detecção de GPU usa ele; cai p/ `lspci`).
+
+## Levantar um juiz (passo a passo)
+
+Exemplo com deploy em `/home/prof`. Ajuste os caminhos no `etc/agent.env`.
+
+### 1. Clonar o código (uma vez por máquina; ou via NFS, ver nota)
+```bash
+sudo -u prof -i
+git clone git@github.com:cd-moj/cdjudge.git    /home/prof/judge
+git clone git@github.com:cd-moj/mojtools.git   /home/prof/mojtools
+```
+> **NFS:** `mojtools` e o **código** do juiz podem morar no NFS compartilhado (montados
+> read-only em cada máquina) — assim você atualiza num lugar só. O que **precisa** ser
+> local/escrita é o sandbox temporário (`/tmp`, `/dev/shm`) e o `etc/worker.token`.
+
+### 2. Montar os problemas via NFS (não replicar)
+Os pacotes de problema ficam num **NFS compartilhado**, montados em `PROBLEMSDIR`:
+```bash
+# /etc/fstab (exemplo): mount read-only em todas as máquinas
+nfsserver:/srv/moj/problems   /home/prof/judge/problems   nfs   ro,soft,_netdev   0 0
+sudo mount /home/prof/judge/problems
+```
+> Atualiza-se **uma vez** (um host roda o `git pull`); todas as máquinas enxergam.
+> O **TL é por host** (`tl.<hostname>` no pacote), então o NFS pode ser read-only para
+> julgar e read-write só durante a calibração (passo 4), ou calibre num host com escrita.
+
+### 3. Instalar o token de worker (segredo)
+A API valida `Authorization: Bearer mojw_<segredo>` contra um token **compartilhado**.
+Gere uma vez (no host da API) e espelhe no juiz (NFS de preferência), **modo 600**:
+```bash
+# no host da API:
+TOK="mojw_$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
+install -Dm600 <(printf '%s' "$TOK") "$RUNDIR/secrets/worker.token"
+# espelhe p/ os juízes (NFS):
+install -Dm600 <(printf '%s' "$TOK") /home/prof/judge/etc/worker.token
+```
+
+### 4. Calibrar o TL desta máquina (gera `tl.<hostname>`)
+Cada máquina tem timing próprio. Rode o calibreitor (do mojtools) nos pacotes que ela vai
+julgar — ele grava `tl.<hostname>` no pacote (no NFS, com escrita) e o `build-and-test`
+prefere `tl.<hostname>` com fallback p/ `tl`:
+```bash
+bash /home/prof/mojtools/calibreitor.sh /home/prof/judge/problems/<repo>/<problema>
+# (precisa de sols/good/ no pacote; ver mojtools)
+```
+
+### 5. Configurar e subir o agente
+```bash
+cd /home/prof/judge
+cp etc/agent.env.sample etc/agent.env
+$EDITOR etc/agent.env      # MOJ_API, CAPABILITY (pos|gpu|cm|hu), caminhos
+```
+Via **systemd** (recomendado) — o unit vive no repo moj (`server/etc/systemd/moj-agent@.service`)
+e lê o `etc/agent.env`:
+```bash
+sudo cp /caminho/moj/server/etc/systemd/moj-agent@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now moj-agent@pos       # @pos | @gpu | @cm | @hu = a CAPABILITY
+journalctl -u moj-agent@pos -f                  # acompanhar
+```
+Ou **na mão** (teste rápido):
+```bash
+set -a; . etc/agent.env; set +a
+bash agent/moj-agent.sh
+```
+
+### 6. Verificar
+```bash
+# saúde geral (público): deve mostrar workers_registered subir
+curl -s https://moj.naquadah.com.br/api/v1/index/status | jq '.judge'
+# detalhe por juiz (admin): esta máquina aparece com specs + inventário + último update
+curl -s -H "Authorization: Bearer <admin-token>" \
+     https://moj.naquadah.com.br/api/v1/judge/list | jq '.judges[] | {host,online,state,problems_count,gpu,last_update}'
+```
+
+## Capacidades
+
+`CAPABILITY` = `pos` (CPU padrão) · `gpu` · `cm` (compiladores) · `hu`. Um job com
+`need_capability` definido só é entregue a máquinas daquela capacidade; sem isso, qualquer
+uma. Rode um `moj-agent@<cap>` por capacidade da máquina.
+
+## Atualizar os problemas (pela plataforma)
+
+Admin dispara `POST /api/v1/ops/updateproblemset {repo}` (ou o sync do treino). Como o NFS é
+compartilhado, **um** agente livre reivindica o pedido no heartbeat, roda `update-problems.sh`
+(`git pull --recurse-submodules` + `make`) e devolve um **report por juiz** (visto em
+`/judge/list .last_update`). Não precisa entrar em cada máquina.
+
+## Legado (durante a migração)
+
+Os `judge/root-daemon*.sh` + `job-receiveitor*.sh` (listeners `nc`) e o
+`sistema_escalonador/` (master) continuam funcionando como **fallback** enquanto o pull é
+validado. Para subir o legado, veja `judge/lancar-juizes.sh` / `sistema_escalonador/lancar-master.sh`.
+Sequência de migração e aposentadoria: **`server/judge-gw/PULL.md`** (repo moj).
+
+## Primeiro push deste repo
+
+`git init` já foi feito. Para publicar:
+```bash
+cd /home/ribas/moj/judge
+git add -A && git commit -m "juiz: agente pull + daemons legados"
+git remote add origin git@github.com:cd-moj/cdjudge.git
+git push -u origin <branch>
+```
+(O `.gitignore` já mantém fora os problemas, a fila do master e os segredos.)
