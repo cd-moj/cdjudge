@@ -104,26 +104,43 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   rm -rf "$work" "$wb" 2>/dev/null
 }
 
-run_update() {  # $1 = update JSON (roda em background; faz o próprio POST de report)
-  local upd="$1" reqid repo logf rc problems pc
+run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de report)
+  local upd="$1" reqid repo kind target logf rc problems pc valjson pkg
   reqid="$(jq -r '.reqid // empty' <<<"$upd")"
   repo="$(jq -r '.repo // ""' <<<"$upd")"
-  logf="$(mktemp)"
-  if [[ -r "$UPDATE_SCRIPT" ]]; then
-    bash "$UPDATE_SCRIPT" stdout "$repo" > "$logf" 2>&1; rc=$?
-  elif [[ -n "$repo" && -d "$PROBLEMSDIR/${repo//#//}" ]]; then
-    ( cd "$PROBLEMSDIR/${repo//#//}" && git pull --recurse-submodules ) > "$logf" 2>&1; rc=$?
-  else
-    echo "sem UPDATE_SCRIPT ($UPDATE_SCRIPT) e repo inválido: '$repo'" > "$logf"; rc=1
-  fi
+  kind="$(jq -r '.kind // "update"' <<<"$upd")"
+  target="$(jq -r '.target // ""' <<<"$upd")"
+  logf="$(mktemp)"; rc=0; valjson=null
+  pkg="$PROBLEMSDIR/${target//#//}"
+  case "$kind" in
+    index)      # valida (portão) + indexa o problema alvo
+      if [[ -n "$target" && -d "$pkg" ]]; then
+        ( cd "$pkg/.." && git pull --recurse-submodules ) >"$logf" 2>&1 || true
+        bash "$MOJTOOLS_DIR/validate-problem.sh" "$pkg" "$target" >>"$logf" 2>&1; rc=$?
+        [[ -f "$RUNDIR/validation/$target.json" ]] && valjson="$(cat "$RUNDIR/validation/$target.json")"
+      else echo "index: pacote inexistente p/ '$target' ($pkg)" >"$logf"; rc=1; fi ;;
+    calibrate)  # roda o calibreitor (tl.<host>) e re-indexa
+      if [[ -n "$target" && -d "$pkg" ]]; then
+        ( cd "$pkg/.." && git pull --recurse-submodules ) >"$logf" 2>&1 || true
+        bash "$MOJTOOLS_DIR/calibreitor.sh" "$pkg" >>"$logf" 2>&1; rc=$?
+        bash "$MOJTOOLS_DIR/validate-problem.sh" "$pkg" "$target" >>"$logf" 2>&1 || true
+        [[ -f "$RUNDIR/validation/$target.json" ]] && valjson="$(cat "$RUNDIR/validation/$target.json")"
+      else echo "calibrate: pacote inexistente p/ '$target'" >"$logf"; rc=1; fi ;;
+    *)          # update (default): git pull + make do repo inteiro
+      if [[ -r "$UPDATE_SCRIPT" ]]; then bash "$UPDATE_SCRIPT" stdout "$repo" >"$logf" 2>&1; rc=$?
+      elif [[ -n "$repo" && -d "$PROBLEMSDIR/${repo//#//}" ]]; then
+        ( cd "$PROBLEMSDIR/${repo//#//}" && git pull --recurse-submodules ) >"$logf" 2>&1; rc=$?
+      else echo "sem UPDATE_SCRIPT ($UPDATE_SCRIPT) e repo inválido: '$repo'" >"$logf"; rc=1; fi ;;
+  esac
   problems="$(agent_problems_json)"; pc="$(jq 'length' <<<"$problems")"
   INVHASH="$(agent_inv_hash "$problems")"
   local okj=false; (( rc == 0 )) && okj=true
   _api /judge/update-report "$(jq -cn --arg host "$AGENT_HOST" --arg reqid "$reqid" \
-    --arg repo "$repo" --argjson ok "$okj" --arg log "$(base64 -w0 < "$logf")" \
-    --argjson pc "${pc:-0}" \
-    '{host:$host, reqid:$reqid, repo:$repo, ok:$ok, log_b64:$log, problems_count:$pc}')" >/dev/null \
-    && alog "update-report enviado reqid=$reqid ok=$okj" || alog "FALHA update-report reqid=$reqid"
+    --arg repo "$repo" --arg kind "$kind" --arg target "$target" --argjson ok "$okj" \
+    --arg log "$(base64 -w0 < "$logf")" --argjson pc "${pc:-0}" --argjson val "$valjson" \
+    '{host:$host, reqid:$reqid, repo:$repo, kind:$kind, target:$target, ok:$ok,
+      log_b64:$log, problems_count:$pc, validation:$val}')" >/dev/null \
+    && alog "report enviado reqid=$reqid kind=$kind ok=$okj" || alog "FALHA report reqid=$reqid"
   rm -f "$logf"
   register   # re-registra o inventário atualizado (e volta a free)
 }
