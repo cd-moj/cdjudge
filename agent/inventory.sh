@@ -2,7 +2,7 @@
 # judge/agent/inventory.sh — coleta specs (CPU/mem/GPU) e inventário de problemas
 # do host para o moj-agent. Sourced pelo agent.
 
-: "${PROBLEMSDIR:=/home/prof/judge/problems}"
+: "${JUDGE_CACHE:=$HOME/.cache/moj/problems}"   # cache local de pacotes (modelo cache)
 
 _detect_gpu() {  # ecoa um JSON {vendor,names} ou null
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -26,15 +26,16 @@ agent_specs_json() {
      '{arch:$arch, cpu:$cpu, ncpu:$ncpu, mem_kb:$mem, gpu:$gpu}'
 }
 
-# objeto {problemid: mtime}; problemid = caminho relativo a PROBLEMSDIR sem "/tl".
+# objeto {id: checksum} dos problemas em CACHE local já calibrados. O id real e o
+# checksum (arquivos que afetam o TL) ficam no .moj-cache.json de cada pacote. Serve p/
+# o escalonador preferir juízes "quentes" e p/ detectar mudança de versão (recalibrar).
 agent_problems_json() {
-  [[ -d "$PROBLEMSDIR" ]] || { echo '{}'; return; }
-  find "$PROBLEMSDIR" -mindepth 1 -name tl -printf '%P %T@\n' 2>/dev/null \
-    | sed 's:/tl : :' \
-    | jq -R -s -c '
-        split("\n")
-        | map(select(length>0) | (split(" ") | {(.[0]): (.[1]|tonumber|floor)}))
-        | add // {}'
+  [[ -d "$JUDGE_CACHE" ]] || { echo '{}'; return; }
+  { while IFS= read -r d; do
+      [[ -f "$d/.moj-cache.json" ]] || continue
+      jq -c 'select(.id and .tl_reported) | {(.id): (.checksum // "")}' "$d/.moj-cache.json" 2>/dev/null
+    done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null); } \
+    | jq -s -c 'add // {}'
 }
 
 agent_inv_hash() {  # $1 = problems-json

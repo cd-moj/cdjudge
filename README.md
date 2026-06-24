@@ -1,9 +1,10 @@
 # cd-moj — Repositório do JUIZ
 
 Código que roda **nas máquinas de julgamento** (não tem server/web). Uma máquina de
-juiz clona **só este repo** + o **mojtools** (sandbox), monta os **problemas via NFS**,
-e sobe o **agente** (`moj-agent`), que se conecta à API do MOJ e **puxa jobs no
-heartbeat** (modelo pull — sem porta de entrada, sem `nc`, sem poll-storm).
+juiz clona **só este repo** + o **mojtools** (sandbox) e sobe o **agente** (`moj-agent`),
+que se conecta à API do MOJ, **puxa jobs no heartbeat** (modelo pull) e **baixa o pacote
+de cada problema sob demanda p/ um cache local** (modelo cache — sem clonar repo, sem
+depender de NFS). Na 1ª vez calibra o problema e **reporta o TL** ao MOJ.
 
 ## Os três repositórios (separados de propósito)
 
@@ -15,7 +16,8 @@ heartbeat** (modelo pull — sem porta de entrada, sem `nc`, sem poll-storm).
 
 > Os três são repos git independentes. No checkout de dev, `mojtools/` e `judge/`
 > ficam aninhados em `~/moj/` mas são **gitignored** pelo moj (têm `.git` próprio).
-> **Problemas** são repos/submódulos próprios, montados via **NFS** — nunca versionados aqui.
+> **Problemas** o juiz baixa do MOJ por problema (`GET /judge/package`) p/ um **cache
+> local** (`JUDGE_CACHE`, default `~/.cache/moj/problems`) — nunca versionados aqui.
 
 ## Layout deste repo
 
@@ -23,12 +25,12 @@ heartbeat** (modelo pull — sem porta de entrada, sem `nc`, sem poll-storm).
 judge/
 ├── agent/                  # AGENTE (modelo pull) — o que se usa daqui pra frente
 │   ├── moj-agent.sh        #   loop: register → heartbeat → (puxa job) → julga → POST result
-│   └── inventory.sh        #   coleta specs (CPU/mem/GPU) + inventário de problemas
-├── update-problems.sh      # git pull + make nos repos de problema (NFS)
+│   └── inventory.sh        #   coleta specs (CPU/mem/GPU) + inventário do cache
+├── update-problems.sh      # LEGADO: git pull + make (modelo NFS) — substituído pelo cache
 ├── judge/                  # LEGADO (em retirada): root-daemon*, job-receiveitor* (listeners nc)
 ├── sistema_escalonador/    # LEGADO (em retirada): master tcpserver + escalonador.sh
 ├── etc/agent.env.sample    # modelo de config do agente (copie p/ etc/agent.env)
-└── problems/               # (gitignored) árvore de problemas — montar via NFS
+└── problems/               # (gitignored) LEGADO: árvore NFS — agora o cache fica em JUDGE_CACHE
 ```
 
 A migração do legado p/ o pull e a aposentadoria estão em **`server/judge-gw/PULL.md`** (repo moj).
@@ -53,16 +55,16 @@ git clone git@github.com:cd-moj/mojtools.git   /home/prof/mojtools
 > read-only em cada máquina) — assim você atualiza num lugar só. O que **precisa** ser
 > local/escrita é o sandbox temporário (`/tmp`, `/dev/shm`) e o `etc/worker.token`.
 
-### 2. Montar os problemas via NFS (não replicar)
-Os pacotes de problema ficam num **NFS compartilhado**, montados em `PROBLEMSDIR`:
+### 2. Cache de problemas (automático — nada a montar)
+O juiz **baixa o pacote de cada problema sob demanda** do MOJ (`GET /judge/package`) p/ o
+cache local `JUDGE_CACHE` (default `~/.cache/moj/problems`). Não há NFS a montar nem repo a
+clonar — só garanta que `JUDGE_CACHE` seja **local com escrita** e tenha espaço.
 ```bash
-# /etc/fstab (exemplo): mount read-only em todas as máquinas
-nfsserver:/srv/moj/problems   /home/prof/judge/problems   nfs   ro,soft,_netdev   0 0
-sudo mount /home/prof/judge/problems
+# opcional: fixar o local do cache no etc/agent.env
+JUDGE_CACHE=/home/prof/judge/cache/problems
 ```
-> Atualiza-se **uma vez** (um host roda o `git pull`); todas as máquinas enxergam.
-> O **TL é por host** (`tl.<hostname>` no pacote), então o NFS pode ser read-only para
-> julgar e read-write só durante a calibração (passo 4), ou calibre num host com escrita.
+> NFS vira **opcional**: se você já tiver os pacotes num NFS, dá p/ pré-popular o cache, mas
+> não é necessário — levantar um juiz novo é só conectar; ele cacheia conforme julga.
 
 ### 3. Instalar o token de worker (segredo)
 A API valida `Authorization: Bearer mojw_<segredo>` contra um token **compartilhado**.
@@ -75,13 +77,15 @@ install -Dm600 <(printf '%s' "$TOK") "$RUNDIR/secrets/worker.token"
 install -Dm600 <(printf '%s' "$TOK") /home/prof/judge/etc/worker.token
 ```
 
-### 4. Calibrar o TL desta máquina (gera `tl.<hostname>`)
-Cada máquina tem timing próprio. Rode o calibreitor (do mojtools) nos pacotes que ela vai
-julgar — ele grava `tl.<hostname>` no pacote (no NFS, com escrita) e o `build-and-test`
-prefere `tl.<hostname>` com fallback p/ `tl`:
+### 4. Calibração do TL (automática na 1ª vez)
+Cada máquina tem timing próprio. O agente **calibra sozinho** na 1ª vez que vê um problema
+(ou quando ele muda): roda o `calibreitor.sh` no cache (gera `tl.<hostname>`) e **reporta o
+TL ao MOJ** (`POST /judge/tl-report`). O MOJ serve o **máx entre os hosts** no treino. Ao
+relançar, o agente re-reporta os TLs do cache (sem recalibrar). Para forçar a calibração de
+um diretório inteiro antes de uma prova, o admin usa `POST /ops/updateproblemset {repo}`
+(enfileira calibração dos problemas novos/alterados). Calibrar na mão (opcional):
 ```bash
-bash /home/prof/mojtools/calibreitor.sh /home/prof/judge/problems/<repo>/<problema>
-# (precisa de sols/good/ no pacote; ver mojtools)
+bash /home/prof/mojtools/calibreitor.sh ~/.cache/moj/problems/<id-encoded>/pkg
 ```
 
 ### 5. Configurar e subir o agente
@@ -121,10 +125,12 @@ uma. Rode um `moj-agent@<cap>` por capacidade da máquina.
 
 ## Atualizar os problemas (pela plataforma)
 
-Admin dispara `POST /api/v1/ops/updateproblemset {repo}` (ou o sync do treino). Como o NFS é
-compartilhado, **um** agente livre reivindica o pedido no heartbeat, roda `update-problems.sh`
-(`git pull --recurse-submodules` + `make`) e devolve um **report por juiz** (visto em
-`/judge/list .last_update`). Não precisa entrar em cada máquina.
+Admin dispara `POST /api/v1/ops/updateproblemset {repo}`. No **modelo cache** isso não clona
+nada: enfileira **calibração** dos problemas novos/alterados (checksum ≠ o do TL já reportado).
+Os juízes livres pegam os pedidos no heartbeat, baixam o pacote, calibram e **reportam o TL**
+(visto em `/judge/list .last_update` e `/ops/problemtl`). `{all:true}` recalibra tudo. Indexar
+o enunciado (HTML/`var/jsons`) roda **no servidor** (publish/webhook). Não precisa entrar em
+cada máquina, e um juiz novo se popula sozinho conforme julga.
 
 ## Legado (durante a migração)
 

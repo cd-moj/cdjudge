@@ -1,26 +1,28 @@
 #!/bin/bash
-# judge/agent/moj-agent.sh — agente de juiz API-first (modelo PULL).
-# Só conexões de SAÍDA (curl): registra capacidade+inventário, manda heartbeat e,
-# quando o heartbeat devolve um job, julga com mojtools e devolve o resultado.
-# Aposenta root-daemon + job-receiveitor (sem porta de entrada, sem nc, sem poll-storm).
+# judge/agent/moj-agent.sh — agente de juiz API-first (modelo PULL + CACHE).
+# Só conexões de SAÍDA (curl). Não clona repositório: baixa o PACOTE de cada problema
+# (sob demanda) p/ um CACHE local, calibra na 1ª vez (e quando o problema muda) e
+# REPORTA o TL ao MOJ. Guarda o tl+checksum no cache p/ re-reportar ao ser relançado.
+# Assim a consistência de NFS vira só "aproveitar o cache" e levantar um juiz é trivial.
 #
 #   MOJ_API=https://moj.example/api/v1 CAPABILITY=pos bash moj-agent.sh
 set -u
-SELF="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SELF/inventory.sh"
 
 : "${MOJ_API:=http://localhost/api/v1}"
-: "${WORKER_TOKEN_FILE:=/home/prof/judge/etc/worker.token}"   # mojw_<segredo> (NFS, 600)
+: "${WORKER_TOKEN_FILE:=/home/prof/judge/etc/worker.token}"   # mojw_<segredo> (600)
 : "${MOJTOOLS_DIR:=$HOME/mojtools}"
-: "${PROBLEMSDIR:=/home/prof/judge/problems}"
-: "${UPDATE_SCRIPT:=/home/prof/judge/update-problems.sh}"
+: "${JUDGE_CACHE:=$HOME/.cache/moj/problems}"                 # cache local de pacotes
 : "${CAPABILITY:=pos}"
 : "${HEARTBEAT_SECS:=3}"
 : "${AGENT_HOST:=$(hostname)}"
 BAT="$MOJTOOLS_DIR/build-and-test.sh"
-export PROBLEMSDIR
+export JUDGE_CACHE
+export HOSTNAME="$AGENT_HOST"   # calibreitor/build-and-test usam tl.$HOSTNAME = tl.$AGENT_HOST
+mkdir -p "$JUDGE_CACHE" 2>/dev/null
 
-TOKEN="$(< "$WORKER_TOKEN_FILE" 2>/dev/null)"
+TOKEN="$(cat "$WORKER_TOKEN_FILE" 2>/dev/null)"   # nota: $(<f 2>/dev/null) some com o conteúdo
 [[ -n "$TOKEN" ]] || { echo "moj-agent: sem worker token em $WORKER_TOKEN_FILE" >&2; exit 1; }
 
 alog() { echo "[moj-agent $(date +%H:%M:%S)] $*" >&2; }
@@ -28,6 +30,99 @@ alog() { echo "[moj-agent $(date +%H:%M:%S)] $*" >&2; }
 _api() {  # _api <path> <json-body> -> resposta no stdout (vazio em erro)
   curl -fsS -m 30 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data "$2" "$MOJ_API$1" 2>/dev/null
+}
+_api_get() {  # _api_get <path> -> corpo no stdout
+  curl -fsS -m 30 -H "Authorization: Bearer $TOKEN" "$MOJ_API$1" 2>/dev/null
+}
+_api_get_file() {  # _api_get_file <path> <outfile> -> baixa (rc!=0 em erro)
+  curl -fsS -m 180 -H "Authorization: Bearer $TOKEN" -o "$2" "$MOJ_API$1" 2>/dev/null
+}
+_uri() { jq -rn --arg s "$1" '$s|@uri'; }   # url-encode (id tem '#')
+
+# ----------------------------------------------------------------- cache de pacotes
+cache_id_dir() { printf '%s/%s' "$JUDGE_CACHE" "$(printf '%s' "$1" | tr '#/' '__')"; }
+
+# tl_to_json <tlfile> -> {lang:val} a partir do bash TL[lang]=val
+tl_to_json() {
+  ( declare -A TL TLMOD; source "$1" 2>/dev/null
+    for k in "${!TL[@]}"; do printf '%s\t%s\n' "$k" "${TL[$k]}"; done ) \
+  | jq -R -s -c 'split("\n")|map(select(length>0)|split("\t")|{(.[0]):.[1]})|add // {}'
+}
+
+# report_tl <id> <checksum> <pkgdir> : reporta ao MOJ o TL calibrado (tl.$AGENT_HOST).
+report_tl() {
+  local id="$1" cks="$2" pkg="$3" tlf="$3/tl.$AGENT_HOST" tlj
+  [[ -f "$tlf" ]] || tlf="$pkg/tl"
+  [[ -f "$tlf" ]] || { alog "report_tl: sem tl p/ $id"; return 1; }
+  tlj="$(tl_to_json "$tlf")"
+  _api /judge/tl-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" \
+        --argjson tl "$tlj" '{host:$h, id:$id, checksum:$c, tl:$tl}')" >/dev/null
+}
+
+# ensure_cached <id> [force_report] : garante o pacote no cache p/ a versão ATUAL e que o
+# TL esteja calibrado+reportado. Baixa+calibra na 1ª vez ou se o checksum mudou. Ecoa o
+# diretório do pacote (cache) no stdout; rc!=0 = não dá p/ julgar.
+ensure_cached() {
+  local id="$1" force="${2:-0}" cdir meta mj sc local_cks
+  cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
+  mkdir -p "$cdir" 2>/dev/null
+  mj="$(_api_get "/judge/package-meta?id=$(_uri "$id")")"
+  [[ "$(jq -r '.exists // false' <<<"$mj" 2>/dev/null)" == true ]] || { alog "pkg inexistente: $id"; return 1; }
+  sc="$(jq -r '.checksum // empty' <<<"$mj" 2>/dev/null)"
+  [[ -n "$sc" ]] || { alog "sem checksum p/ $id"; return 1; }
+  local_cks="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
+
+  # cache válido (mesma versão) + já calibrado: opcionalmente re-reporta e sai
+  if [[ -d "$cdir/pkg" && "$local_cks" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then
+    if [[ "$force" == 1 ]]; then
+      report_tl "$id" "$sc" "$cdir/pkg" \
+        && jq -c --argjson now "$EPOCHSECONDS" '.tl_reported=true|.reported_at=$now' "$meta" >"$meta.t" 2>/dev/null \
+        && mv -f "$meta.t" "$meta"
+    fi
+    printf '%s' "$cdir/pkg"; return 0
+  fi
+
+  # (1ª vez ou mudou) baixa+extrai+calibra+reporta, sob lock por-problema
+  (
+    flock 9 || exit 1
+    local lc; lc="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
+    if [[ -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then exit 0; fi  # outro já fez
+    local tar="$cdir/.pkg.tgz" top src
+    _api_get_file "/judge/package?id=$(_uri "$id")" "$tar" || { alog "falha baixar $id"; exit 1; }
+    rm -rf "$cdir/.new"; mkdir -p "$cdir/.new"
+    tar -xzf "$tar" -C "$cdir/.new" --no-same-owner 2>/dev/null || { alog "tar inválido $id"; rm -f "$tar"; exit 1; }
+    rm -f "$tar"
+    top="$(find "$cdir/.new" -mindepth 1 -maxdepth 1)"
+    if [[ "$(printf '%s\n' "$top" | grep -c .)" -eq 1 && -d "$top" ]]; then src="$top"; else src="$cdir/.new"; fi
+    rm -rf "$cdir/pkg.tmp"; cp -a "$src" "$cdir/pkg.tmp" 2>/dev/null
+    rm -rf "$cdir/.new"
+    rm -rf "$cdir/pkg"; mv "$cdir/pkg.tmp" "$cdir/pkg" 2>/dev/null
+    # calibra (gera tl.$AGENT_HOST) e reporta
+    bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+    [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
+    report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
+    jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
+       '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$now, reported_at:$now}' > "$meta"
+    alog "cacheado+calibrado $id (cks=${sc:0:8})"
+  ) 9>"$cdir.lock"
+
+  [[ -d "$cdir/pkg" && -f "$cdir/pkg/tl.$AGENT_HOST" ]] || return 1
+  printf '%s' "$cdir/pkg"
+}
+
+# report_cached_tls : ao subir/relançar, re-reporta o TL de todos os problemas do cache
+# já calibrados (o MOJ repovoa o TL por host sem recalibrar).
+report_cached_tls() {
+  local d id cks n=0
+  [[ -d "$JUDGE_CACHE" ]] || return 0
+  while IFS= read -r d; do
+    [[ -f "$d/.moj-cache.json" && -d "$d/pkg" ]] || continue
+    id="$(jq -r '.id // empty' "$d/.moj-cache.json" 2>/dev/null)"
+    cks="$(jq -r '.checksum // empty' "$d/.moj-cache.json" 2>/dev/null)"
+    [[ -n "$id" && -n "$cks" && -f "$d/pkg/tl.$AGENT_HOST" ]] || continue
+    report_tl "$id" "$cks" "$d/pkg" && n=$((n+1))
+  done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  (( n > 0 )) && alog "re-reportei TL de $n problema(s) do cache"
 }
 
 INVHASH=""
@@ -39,7 +134,7 @@ register() {
     --argjson specs "$specs" --argjson problems "$problems" --arg ih "$INVHASH" \
     '$specs + {host:$host, capability:$cap, problems:$problems, inv_hash:$ih}')"
   _api /judge/register "$body" >/dev/null \
-    && alog "registrado ($(jq -r 'length' <<<"$problems") problemas, inv=$INVHASH)" \
+    && alog "registrado ($(jq -r 'length' <<<"$problems") problemas em cache, inv=$INVHASH)" \
     || alog "falha ao registrar"
 }
 
@@ -59,6 +154,14 @@ agent_tests_json() {  # $1=workdir $2=tl
   } | jq -s -c '.'
 }
 
+# resultado de Judge Error simples (sem testes), p/ falhas de preparo do pacote.
+_post_judge_error() {  # $1=id $2=contest $3=problem $4=login $5=lang $6=msg
+  _api /judge/result "$(jq -cn --arg host "$AGENT_HOST" --arg id "$1" --arg c "$2" \
+     --arg p "$3" --arg login "$4" --arg lang "$5" --arg v "$6" \
+     '{host:$host,id:$id,contest:$c,problem_id:$p,login:$login,lang:$lang,verdict:$v,
+       score:0,correct:0,total_tests:0,duration_s:0,tl_used:null,tests:[],report_html_b64:null}')" >/dev/null
+}
+
 run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   local job="$1" id contest problem login lang filename code_b64
   id="$(jq -r '.id // empty' <<<"$job")"
@@ -69,8 +172,11 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   filename="$(basename "$(jq -r '.filename // "solution"' <<<"$job")")"
   code_b64="$(jq -r '.code_b64 // .fileb64 // ""' <<<"$job")"
 
-  local pkg="$PROBLEMSDIR/$problem"
-  [[ -d "$pkg" ]] || pkg="$PROBLEMSDIR/${problem//#//}"   # repo#prob -> repo/prob
+  # garante o pacote no cache (baixa + calibra na 1ª vez / se mudou)
+  local pkg; pkg="$(ensure_cached "$problem")" || {
+    _post_judge_error "$id" "$contest" "$problem" "$login" "$lang" "Judge Error (pacote indisponível)"
+    alog "FALHA preparar pacote id=$id problem=$problem"; return; }
+
   local work src; work="$(mktemp -d)"; src="$work/$filename"
   printf '%s' "$code_b64" | base64 -d > "$src" 2>/dev/null
 
@@ -105,39 +211,27 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
 }
 
 run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de report)
-  local upd="$1" reqid repo kind target logf rc problems pc valjson pkg
+  local upd="$1" reqid repo kind target logf rc okj problems pc
   reqid="$(jq -r '.reqid // empty' <<<"$upd")"
   repo="$(jq -r '.repo // ""' <<<"$upd")"
-  kind="$(jq -r '.kind // "update"' <<<"$upd")"
+  kind="$(jq -r '.kind // "calibrate"' <<<"$upd")"
   target="$(jq -r '.target // ""' <<<"$upd")"
-  logf="$(mktemp)"; rc=0; valjson=null
-  pkg="$PROBLEMSDIR/${target//#//}"
+  logf="$(mktemp)"; rc=0
   case "$kind" in
-    index)      # valida (portão) + indexa o problema alvo
-      if [[ -n "$target" && -d "$pkg" ]]; then
-        ( cd "$pkg/.." && git pull --recurse-submodules ) >"$logf" 2>&1 || true
-        bash "$MOJTOOLS_DIR/validate-problem.sh" "$pkg" "$target" >>"$logf" 2>&1; rc=$?
-        [[ -f "$RUNDIR/validation/$target.json" ]] && valjson="$(cat "$RUNDIR/validation/$target.json")"
-      else echo "index: pacote inexistente p/ '$target' ($pkg)" >"$logf"; rc=1; fi ;;
-    calibrate)  # roda o calibreitor (tl.<host>) e re-indexa
-      if [[ -n "$target" && -d "$pkg" ]]; then
-        ( cd "$pkg/.." && git pull --recurse-submodules ) >"$logf" 2>&1 || true
-        bash "$MOJTOOLS_DIR/calibreitor.sh" "$pkg" >>"$logf" 2>&1; rc=$?
-        bash "$MOJTOOLS_DIR/validate-problem.sh" "$pkg" "$target" >>"$logf" 2>&1 || true
-        [[ -f "$RUNDIR/validation/$target.json" ]] && valjson="$(cat "$RUNDIR/validation/$target.json")"
-      else echo "calibrate: pacote inexistente p/ '$target'" >"$logf"; rc=1; fi ;;
-    *)          # update (default): git pull + make do repo inteiro
-      if [[ -r "$UPDATE_SCRIPT" ]]; then bash "$UPDATE_SCRIPT" stdout "$repo" >"$logf" 2>&1; rc=$?
-      elif [[ -n "$repo" && -d "$PROBLEMSDIR/${repo//#//}" ]]; then
-        ( cd "$PROBLEMSDIR/${repo//#//}" && git pull --recurse-submodules ) >"$logf" 2>&1; rc=$?
-      else echo "sem UPDATE_SCRIPT ($UPDATE_SCRIPT) e repo inválido: '$repo'" >"$logf"; rc=1; fi ;;
+    calibrate)   # baixa o pacote (se preciso), calibra e reporta o TL — força re-report
+      if [[ -n "$target" ]]; then
+        ensure_cached "$target" 1 >/dev/null 2>"$logf"; rc=$?
+        (( rc == 0 )) && echo "calibrado/atualizado: $target" >> "$logf"
+      else echo "calibrate sem target" > "$logf"; rc=1; fi ;;
+    *)           # index/update: legados — agora o SERVIDOR indexa e mantém o store
+      echo "kind=$kind é legado no modelo cache (o servidor indexa); nada a fazer no juiz." > "$logf"; rc=0 ;;
   esac
   problems="$(agent_problems_json)"; pc="$(jq 'length' <<<"$problems")"
   INVHASH="$(agent_inv_hash "$problems")"
-  local okj=false; (( rc == 0 )) && okj=true
+  okj=false; (( rc == 0 )) && okj=true
   _api /judge/update-report "$(jq -cn --arg host "$AGENT_HOST" --arg reqid "$reqid" \
     --arg repo "$repo" --arg kind "$kind" --arg target "$target" --argjson ok "$okj" \
-    --arg log "$(base64 -w0 < "$logf")" --argjson pc "${pc:-0}" --argjson val "$valjson" \
+    --arg log "$(base64 -w0 < "$logf")" --argjson pc "${pc:-0}" --argjson val null \
     '{host:$host, reqid:$reqid, repo:$repo, kind:$kind, target:$target, ok:$ok,
       log_b64:$log, problems_count:$pc, validation:$val}')" >/dev/null \
     && alog "report enviado reqid=$reqid kind=$kind ok=$okj" || alog "FALHA report reqid=$reqid"
@@ -146,8 +240,10 @@ run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de 
 }
 
 # ----------------------------------------------------------------- loop principal
-alog "subindo: host=$AGENT_HOST cap=$CAPABILITY api=$MOJ_API hb=${HEARTBEAT_SECS}s"
+moj_agent_main() {
+alog "subindo: host=$AGENT_HOST cap=$CAPABILITY api=$MOJ_API cache=$JUDGE_CACHE hb=${HEARTBEAT_SECS}s"
 register
+report_cached_tls    # relançamento: reenvia os TLs já calibrados (sem recalibrar)
 BUSYPID=0   # pid do job/update rodando em background (0 = livre)
 while true; do
   if (( BUSYPID != 0 )) && ! kill -0 "$BUSYPID" 2>/dev/null; then BUSYPID=0; fi
@@ -172,3 +268,7 @@ while true; do
   fi
   sleep "$HEARTBEAT_SECS"
 done
+}
+
+# executado direto -> roda o loop; "sourced" (testes) -> só expõe as funções.
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && moj_agent_main
