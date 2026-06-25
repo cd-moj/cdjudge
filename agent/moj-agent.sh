@@ -67,14 +67,23 @@ report_tl() {
         --argjson tl "$tlj" '{host:$h, id:$id, checksum:$c, tl:$tl}')" >/dev/null
 }
 
-# report_calib_log <id> <checksum> <logfile> : envia o LOG de calibração (limitado) ao MOJ,
-# p/ o autor ver, por juiz, como cada solução se comportou. Falha não atrapalha o julgamento.
+# report_calib_log <id> <checksum> <logfile> [pkgdir] : envia ao MOJ o LOG de calibração
+# (limitado) + o report.html POR SOLUÇÃO (pkg/.calib-reports/*), p/ o autor ver no editor, por
+# juiz, como cada solução se comportou. Falha não atrapalha o julgamento.
 report_calib_log() {
-  local id="$1" cks="$2" lf="$3" log
-  [[ -f "$lf" ]] || return 0
-  log="$(tail -c 60000 "$lf" 2>/dev/null)"
-  _api /judge/calib-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
-        '{host:$h, id:$id, checksum:$c, log:$log}')" >/dev/null || true
+  local id="$1" cks="$2" lf="$3" pkg="${4:-}" log="" reports='[]'
+  [[ -f "$lf" ]] && log="$(tail -c 60000 "$lf" 2>/dev/null)"
+  if [[ -d "$pkg/.calib-reports" ]]; then
+    local rf n=0 sz
+    for rf in "$pkg/.calib-reports/"*.html; do
+      [[ -f "$rf" ]] || continue
+      sz="$(stat -c%s "$rf" 2>/dev/null || echo 0)"; (( sz > 0 && sz <= 500000 )) || continue
+      (( n++ >= 12 )) && break
+      reports="$(jq -c --arg n "$(basename "$rf" .html)" --rawfile h "$rf" '. + [{name:$n, html_b64:($h|@base64)}]' <<<"$reports" 2>/dev/null)" || reports='[]'
+    done
+  fi
+  _api /judge/calib-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" --argjson reports "$reports" \
+        '{host:$h, id:$id, checksum:$c, log:$log, reports:$reports}')" >/dev/null || true
 }
 
 # ensure_cached <id> [force_report] [full] : garante o pacote no cache p/ a versão ATUAL e que
@@ -128,7 +137,7 @@ ensure_cached() {
     fi
     [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
     report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
-    report_calib_log "$id" "$sc" "$cdir/.calib.log"
+    report_calib_log "$id" "$sc" "$cdir/.calib.log" "$cdir/pkg"
     jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
        '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$now, reported_at:$now}' > "$meta"
     alog "cacheado+calibrado $id (cks=${sc:0:8})"
