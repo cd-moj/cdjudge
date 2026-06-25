@@ -41,6 +41,11 @@ A migração do legado p/ o pull e a aposentadoria estão em **`server/judge-gw/
 compiladores/runtimes das linguagens que a máquina vai julgar (gcc/g++, python3, openjdk, …).
 Máquinas **GPU**: `nvidia-smi` (a detecção de GPU usa ele; cai p/ `lspci`).
 
+> **Toolchain reprodutível (opcional):** em vez de instalar compiladores no host, a jaula pode
+> rodar a partir de um **rootfs** (ex.: Ubuntu 24.04 com tudo). Construa com `make-sysroot.sh`
+> (podman) e aponte `CAGE_ROOT=<dir>` no `agent.env`. Aí o host só precisa de `bwrap`+`podman`.
+> Ver **`mojtools/SANDBOX.md`**.
+
 ## Levantar um juiz (passo a passo)
 
 Exemplo com deploy em `/home/prof`. Ajuste os caminhos no `etc/agent.env`.
