@@ -131,9 +131,9 @@ ensure_cached() {
     # (good/pass/slow/wrong) p/ o log mostrar o comportamento de cada uma; senão só as good
     # (rápido, sob demanda). Robusto a toolchain ausente (pula a linguagem, não aborta).
     if [[ "$full" == 1 ]]; then
-      bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+      MOJ_PROBLEM_ID="$id" bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
     else
-      CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+      MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
     fi
     [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
     report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
@@ -304,6 +304,13 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}
       pkill -f calibreitor.sh 2>/dev/null
       [[ -n "$JUDGE_CACHE" ]] && rm -rf "${JUDGE_CACHE:?}/"* 2>/dev/null
       register   # inventário agora vazio -> o MOJ vê o cache limpo
+      ;;
+    calibrate)   # calibração DIRECIONADA a este host (full): baixa/recalibra e reporta
+      local target; target="$(jq -r '.id // empty' <<<"$c" 2>/dev/null)"
+      if [[ -n "$target" ]]; then
+        alog "comando: calibrar $target (full) neste host"
+        ensure_cached "$target" 1 1 >/dev/null 2>&1 && alog "calibrado $target" || alog "calibrate $target falhou"
+      else alog "comando calibrate sem id"; fi
       ;;
     *) alog "comando desconhecido: ${action:-<vazio>}" ;;
   esac
