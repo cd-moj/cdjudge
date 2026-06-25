@@ -27,15 +27,23 @@ TOKEN="$(cat "$WORKER_TOKEN_FILE" 2>/dev/null)"   # nota: $(<f 2>/dev/null) some
 
 alog() { echo "[moj-agent $(date +%H:%M:%S)] $*" >&2; }
 
+# Deploys atrás de túnel SSH/proxy. MOJ_RESOLVE="host:porta:IP" mapeia o nome p/ o túnel
+# (curl --resolve) preservando SNI/cert/Host — ideal p/ HTTPS (8443) via reverse tunnel.
+# MOJ_HOST_HEADER manda "Host: <nome>" (caso HTTP por vhost). Ambos opcionais.
+: "${MOJ_HOST_HEADER:=}"
+: "${MOJ_RESOLVE:=}"
+_HH=(); [[ -n "$MOJ_HOST_HEADER" ]] && _HH=(-H "Host: $MOJ_HOST_HEADER")
+[[ -n "$MOJ_RESOLVE" ]] && _HH+=(--resolve "$MOJ_RESOLVE")
+
 _api() {  # _api <path> <json-body> -> resposta no stdout (vazio em erro)
-  curl -fsS -m 30 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data "$2" "$MOJ_API$1" 2>/dev/null
 }
 _api_get() {  # _api_get <path> -> corpo no stdout
-  curl -fsS -m 30 -H "Authorization: Bearer $TOKEN" "$MOJ_API$1" 2>/dev/null
+  curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" "$MOJ_API$1" 2>/dev/null
 }
 _api_get_file() {  # _api_get_file <path> <outfile> -> baixa (rc!=0 em erro)
-  curl -fsS -m 180 -H "Authorization: Bearer $TOKEN" -o "$2" "$MOJ_API$1" 2>/dev/null
+  curl -fsS -m 180 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -o "$2" "$MOJ_API$1" 2>/dev/null
 }
 _uri() { jq -rn --arg s "$1" '$s|@uri'; }   # url-encode (id tem '#')
 
@@ -97,8 +105,9 @@ ensure_cached() {
     rm -rf "$cdir/pkg.tmp"; cp -a "$src" "$cdir/pkg.tmp" 2>/dev/null
     rm -rf "$cdir/.new"
     rm -rf "$cdir/pkg"; mv "$cdir/pkg.tmp" "$cdir/pkg" 2>/dev/null
-    # calibra (gera tl.$AGENT_HOST) e reporta
-    bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+    # calibra (gera tl.$AGENT_HOST) e reporta. CALIBRATE_ONLY_GOOD: só as good (rápido,
+    # sob demanda); robusto a toolchain ausente (pula a linguagem, não aborta).
+    CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
     [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
     report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
     jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
@@ -221,7 +230,20 @@ run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de 
     calibrate)   # baixa o pacote (se preciso), calibra e reporta o TL — força re-report
       if [[ -n "$target" ]]; then
         ensure_cached "$target" 1 >/dev/null 2>"$logf"; rc=$?
-        (( rc == 0 )) && echo "calibrado/atualizado: $target" >> "$logf"
+        # anexa o LOG da calibração (calibreitor) ao report -> visível no MOJ sem ssh.
+        local _cd; _cd="$(cache_id_dir "$target")"
+        if [[ -f "$_cd/.calib.log" ]]; then
+          local _fails; _fails="$(grep -c 'was waiting Accepted' "$_cd/.calib.log" 2>/dev/null)"
+          if [[ "${_fails:-0}" -gt 0 ]]; then
+            echo "### ATENÇÃO: $_fails solução(ões) NÃO passaram na calibração de $target em $AGENT_HOST:" >> "$logf"
+            grep 'was waiting Accepted' "$_cd/.calib.log" 2>/dev/null \
+              | sed -E 's#^.*/sols/good/##; s# Check /tmp/.*$##' >> "$logf"
+            echo "### (toolchain ausente/erro no juiz, ou solução realmente incorreta)" >> "$logf"
+            rc=2   # calibrou (TL existe) mas com falhas -> sinaliza p/ o MOJ
+          fi
+          echo "=== calibreitor.log ($target @ $AGENT_HOST) ===" >> "$logf"
+          cat "$_cd/.calib.log" >> "$logf"
+        fi
       else echo "calibrate sem target" > "$logf"; rc=1; fi ;;
     *)           # index/update: legados — agora o SERVIDOR indexa e mantém o store
       echo "kind=$kind é legado no modelo cache (o servidor indexa); nada a fazer no juiz." > "$logf"; rc=0 ;;
