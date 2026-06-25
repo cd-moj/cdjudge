@@ -140,8 +140,10 @@ register() {
   specs="$(agent_specs_json)"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
   INVHASH="$(agent_inv_hash "$problems")"
   body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$CAPABILITY" \
-    --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" --arg ih "$INVHASH" \
-    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs, inv_hash:$ih}')"
+    --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" \
+    --arg cage "${CAGE_ROOT:-}" --arg ih "$INVHASH" \
+    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs,
+               cage_root:(if $cage=="" then null else $cage end), inv_hash:$ih}')"
   _api /judge/register "$body" >/dev/null \
     && alog "registrado ($(jq -r 'length' <<<"$problems") problemas, $(jq -r 'length' <<<"$langs") linguagens, inv=$INVHASH)" \
     || alog "falha ao registrar"
@@ -190,7 +192,9 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   printf '%s' "$code_b64" | base64 -d > "$src" 2>/dev/null
 
   local out wb verdict
-  out="$(bash "$BAT" "$lang" "$src" "$pkg" y 2>/dev/null)"
+  # MOJ_PROBLEM_ID: id real do problema p/ o report (o pacote no cache é <id>/pkg) + ativa a
+  # coleta do toolchain no build-and-test (só p/ submissão real, não na calibração).
+  out="$(MOJ_PROBLEM_ID="$problem" bash "$BAT" "$lang" "$src" "$pkg" y 2>/dev/null)"
   wb="$(printf '%s\n' "$out" | head -n1)"
   verdict="$(printf '%s\n' "$out" | tail -n1)"
   [[ -n "$verdict" ]] || verdict="Judge Error (no verdict)"
