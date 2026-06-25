@@ -136,14 +136,14 @@ report_cached_tls() {
 
 INVHASH=""
 register() {
-  local specs problems body
-  specs="$(agent_specs_json)"; problems="$(agent_problems_json)"
+  local specs problems langs body
+  specs="$(agent_specs_json)"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
   INVHASH="$(agent_inv_hash "$problems")"
   body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$CAPABILITY" \
-    --argjson specs "$specs" --argjson problems "$problems" --arg ih "$INVHASH" \
-    '$specs + {host:$host, capability:$cap, problems:$problems, inv_hash:$ih}')"
+    --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" --arg ih "$INVHASH" \
+    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs, inv_hash:$ih}')"
   _api /judge/register "$body" >/dev/null \
-    && alog "registrado ($(jq -r 'length' <<<"$problems") problemas em cache, inv=$INVHASH)" \
+    && alog "registrado ($(jq -r 'length' <<<"$problems") problemas, $(jq -r 'length' <<<"$langs") linguagens, inv=$INVHASH)" \
     || alog "falha ao registrar"
 }
 

@@ -26,6 +26,32 @@ agent_specs_json() {
      '{arch:$arch, cpu:$cpu, ncpu:$ncpu, mem_kb:$mem, gpu:$gpu}'
 }
 
+# linguagens que ESTE host consegue julgar = lang-dirs cujo binário principal existe.
+# O escalonador usa isso p/ rotear cada submissão a um juiz com o toolchain dela (route
+# by language). Valores são alternativas (basta UMA existir). 'sh' é sempre suportado.
+declare -A _LANGBIN=(
+  [c]="gcc" [cpp]="g++" [java]="javac" [py3]="python3" [py2]="python python2"
+  [go]="gccgo go" [rs]="rustc" [hs]="ghc" [cs]="mcs mono-csc csc" [pas]="fpc"
+  [pl]="swipl prolog pl" [js]="node nodejs" [ml]="ocamlopt ocaml" [spim]="spim"
+  [apl]="dyalog mapl apl" [riscv]="java" [sh]="bash"
+)
+agent_langs_json() {
+  local l b ok first=1 out='[' root="${CAGE_ROOT:-}"
+  for l in "${!_LANGBIN[@]}"; do
+    ok=0
+    for b in ${_LANGBIN[$l]}; do
+      if [[ -n "$root" ]]; then   # com CAGE_ROOT, o toolchain vem do ROOTFS (não do host)
+        [[ -x "$root/usr/local/bin/$b" || -x "$root/usr/bin/$b" || -x "$root/bin/$b" ]] && { ok=1; break; }
+      else
+        command -v "$b" >/dev/null 2>&1 && { ok=1; break; }
+      fi
+    done
+    (( ok )) || continue
+    [[ $first -eq 1 ]] || out+=','; first=0; out+="\"$l\""
+  done
+  out+=']'; printf '%s' "$out" | jq -c 'sort'
+}
+
 # objeto {id: checksum} dos problemas em CACHE local já calibrados. O id real e o
 # checksum (arquivos que afetam o TL) ficam no .moj-cache.json de cada pacote. Serve p/
 # o escalonador preferir juízes "quentes" e p/ detectar mudança de versão (recalibrar).
