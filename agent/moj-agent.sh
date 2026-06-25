@@ -67,11 +67,21 @@ report_tl() {
         --argjson tl "$tlj" '{host:$h, id:$id, checksum:$c, tl:$tl}')" >/dev/null
 }
 
-# ensure_cached <id> [force_report] : garante o pacote no cache p/ a versão ATUAL e que o
-# TL esteja calibrado+reportado. Baixa+calibra na 1ª vez ou se o checksum mudou. Ecoa o
-# diretório do pacote (cache) no stdout; rc!=0 = não dá p/ julgar.
+# report_calib_log <id> <checksum> <logfile> : envia o LOG de calibração (limitado) ao MOJ,
+# p/ o autor ver, por juiz, como cada solução se comportou. Falha não atrapalha o julgamento.
+report_calib_log() {
+  local id="$1" cks="$2" lf="$3" log
+  [[ -f "$lf" ]] || return 0
+  log="$(tail -c 60000 "$lf" 2>/dev/null)"
+  _api /judge/calib-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
+        '{host:$h, id:$id, checksum:$c, log:$log}')" >/dev/null || true
+}
+
+# ensure_cached <id> [force_report] [full] : garante o pacote no cache p/ a versão ATUAL e que
+# o TL esteja calibrado+reportado. Baixa+calibra na 1ª vez ou se o checksum mudou. full=1 força
+# recalibração rodando TODAS as soluções (Calibrar explícito). Ecoa o diretório do pacote.
 ensure_cached() {
-  local id="$1" force="${2:-0}" cdir meta mj sc local_cks
+  local id="$1" force="${2:-0}" full="${3:-0}" cdir meta mj sc local_cks
   cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
   mkdir -p "$cdir" 2>/dev/null
   mj="$(_api_get "/judge/package-meta?id=$(_uri "$id")")"
@@ -80,8 +90,8 @@ ensure_cached() {
   [[ -n "$sc" ]] || { alog "sem checksum p/ $id"; return 1; }
   local_cks="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
 
-  # cache válido (mesma versão) + já calibrado: opcionalmente re-reporta e sai
-  if [[ -d "$cdir/pkg" && "$local_cks" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then
+  # cache válido (mesma versão) + já calibrado: opcionalmente re-reporta e sai (full=1 recalibra)
+  if [[ "$full" != 1 && -d "$cdir/pkg" && "$local_cks" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then
     if [[ "$force" == 1 ]]; then
       report_tl "$id" "$sc" "$cdir/pkg" \
         && jq -c --argjson now "$EPOCHSECONDS" '.tl_reported=true|.reported_at=$now' "$meta" >"$meta.t" 2>/dev/null \
@@ -94,22 +104,31 @@ ensure_cached() {
   (
     flock 9 || exit 1
     local lc; lc="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
-    if [[ -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then exit 0; fi  # outro já fez
-    local tar="$cdir/.pkg.tgz" top src
-    _api_get_file "/judge/package?id=$(_uri "$id")" "$tar" || { alog "falha baixar $id"; exit 1; }
-    rm -rf "$cdir/.new"; mkdir -p "$cdir/.new"
-    tar -xzf "$tar" -C "$cdir/.new" --no-same-owner 2>/dev/null || { alog "tar inválido $id"; rm -f "$tar"; exit 1; }
-    rm -f "$tar"
-    top="$(find "$cdir/.new" -mindepth 1 -maxdepth 1)"
-    if [[ "$(printf '%s\n' "$top" | grep -c .)" -eq 1 && -d "$top" ]]; then src="$top"; else src="$cdir/.new"; fi
-    rm -rf "$cdir/pkg.tmp"; cp -a "$src" "$cdir/pkg.tmp" 2>/dev/null
-    rm -rf "$cdir/.new"
-    rm -rf "$cdir/pkg"; mv "$cdir/pkg.tmp" "$cdir/pkg" 2>/dev/null
-    # calibra (gera tl.$AGENT_HOST) e reporta. CALIBRATE_ONLY_GOOD: só as good (rápido,
-    # sob demanda); robusto a toolchain ausente (pula a linguagem, não aborta).
-    CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+    if [[ "$full" != 1 && -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then exit 0; fi  # outro já fez
+    # baixa+extrai só se ainda não temos a versão atual (em full reaproveita o pacote do cache)
+    if [[ ! -d "$cdir/pkg" || "$lc" != "$sc" ]]; then
+      local tar="$cdir/.pkg.tgz" top src
+      _api_get_file "/judge/package?id=$(_uri "$id")" "$tar" || { alog "falha baixar $id"; exit 1; }
+      rm -rf "$cdir/.new"; mkdir -p "$cdir/.new"
+      tar -xzf "$tar" -C "$cdir/.new" --no-same-owner 2>/dev/null || { alog "tar inválido $id"; rm -f "$tar"; exit 1; }
+      rm -f "$tar"
+      top="$(find "$cdir/.new" -mindepth 1 -maxdepth 1)"
+      if [[ "$(printf '%s\n' "$top" | grep -c .)" -eq 1 && -d "$top" ]]; then src="$top"; else src="$cdir/.new"; fi
+      rm -rf "$cdir/pkg.tmp"; cp -a "$src" "$cdir/pkg.tmp" 2>/dev/null
+      rm -rf "$cdir/.new"
+      rm -rf "$cdir/pkg"; mv "$cdir/pkg.tmp" "$cdir/pkg" 2>/dev/null
+    fi
+    # calibra (gera tl.$AGENT_HOST) e reporta. full=1 (Calibrar explícito) roda TODAS as soluções
+    # (good/pass/slow/wrong) p/ o log mostrar o comportamento de cada uma; senão só as good
+    # (rápido, sob demanda). Robusto a toolchain ausente (pula a linguagem, não aborta).
+    if [[ "$full" == 1 ]]; then
+      bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+    else
+      CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+    fi
     [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
     report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
+    report_calib_log "$id" "$sc" "$cdir/.calib.log"
     jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
        '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$now, reported_at:$now}' > "$meta"
     alog "cacheado+calibrado $id (cks=${sc:0:8})"
@@ -233,9 +252,9 @@ run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de 
   target="$(jq -r '.target // ""' <<<"$upd")"
   logf="$(mktemp)"; rc=0
   case "$kind" in
-    calibrate)   # baixa o pacote (se preciso), calibra e reporta o TL — força re-report
+    calibrate)   # Calibrar explícito: roda TODAS as soluções (full=1) e reporta TL + log
       if [[ -n "$target" ]]; then
-        ensure_cached "$target" 1 >/dev/null 2>"$logf"; rc=$?
+        ensure_cached "$target" 1 1 >/dev/null 2>"$logf"; rc=$?
         # anexa o LOG da calibração (calibreitor) ao report -> visível no MOJ sem ssh.
         local _cd; _cd="$(cache_id_dir "$target")"
         if [[ -f "$_cd/.calib.log" ]]; then
