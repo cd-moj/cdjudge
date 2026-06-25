@@ -139,11 +139,13 @@ register() {
   local specs problems langs body
   specs="$(agent_specs_json)"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
   INVHASH="$(agent_inv_hash "$problems")"
+  local cbytes; cbytes="$(du -sb "$JUDGE_CACHE" 2>/dev/null | cut -f1)"; [[ "$cbytes" =~ ^[0-9]+$ ]] || cbytes=0
   body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$CAPABILITY" \
     --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" \
-    --arg cage "${CAGE_ROOT:-}" --arg ih "$INVHASH" \
+    --arg cage "${CAGE_ROOT:-}" --argjson cb "$cbytes" --arg ih "$INVHASH" \
     '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs,
-               cage_root:(if $cage=="" then null else $cage end), inv_hash:$ih}')"
+               cage_root:(if $cage=="" then null else $cage end),
+               cache_bytes:$cb, inv_hash:$ih}')"
   _api /judge/register "$body" >/dev/null \
     && alog "registrado ($(jq -r 'length' <<<"$problems") problemas, $(jq -r 'length' <<<"$langs") linguagens, inv=$INVHASH)" \
     || alog "falha ao registrar"
@@ -265,6 +267,20 @@ run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de 
   register   # re-registra o inventário atualizado (e volta a free)
 }
 
+# comando por-host vindo do admin (heartbeat). Hoje: limpar o cache local.
+run_command() {  # $1 = command JSON {cmdid, action, ...}
+  local c="$1" action; action="$(jq -r '.action // empty' <<<"$c" 2>/dev/null)"
+  case "$action" in
+    clearcache)
+      alog "comando do admin: limpar cache ($JUDGE_CACHE)"
+      pkill -f calibreitor.sh 2>/dev/null
+      [[ -n "$JUDGE_CACHE" ]] && rm -rf "${JUDGE_CACHE:?}/"* 2>/dev/null
+      register   # inventário agora vazio -> o MOJ vê o cache limpo
+      ;;
+    *) alog "comando desconhecido: ${action:-<vazio>}" ;;
+  esac
+}
+
 # ----------------------------------------------------------------- loop principal
 moj_agent_main() {
 alog "subindo: host=$AGENT_HOST cap=$CAPABILITY api=$MOJ_API cache=$JUDGE_CACHE hb=${HEARTBEAT_SECS}s"
@@ -281,9 +297,13 @@ while true; do
   if [[ -n "$resp" ]]; then
     [[ "$(jq -r '.reregister // false' <<<"$resp" 2>/dev/null)" == true ]] && register
     if (( BUSYPID == 0 )); then
+      cmd="$(jq -c '.command // empty' <<<"$resp" 2>/dev/null)"
       upd="$(jq -c '.update // empty' <<<"$resp" 2>/dev/null)"
       job="$(jq -c '.assigned // empty' <<<"$resp" 2>/dev/null)"
-      if [[ -n "$upd" && "$upd" != null ]]; then
+      if [[ -n "$cmd" && "$cmd" != null ]]; then
+        run_command "$cmd" & BUSYPID=$!
+        alog "comando reivindicado $(jq -r '.action // .cmdid' <<<"$cmd" 2>/dev/null) -> pid $BUSYPID"
+      elif [[ -n "$upd" && "$upd" != null ]]; then
         run_update "$upd" & BUSYPID=$!
         alog "update reivindicado reqid=$(jq -r '.reqid' <<<"$upd" 2>/dev/null) -> pid $BUSYPID"
       elif [[ -n "$job" && "$job" != null ]]; then
