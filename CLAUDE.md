@@ -25,4 +25,4 @@ Detalhes: `cdmoj/server/judge-gw/PULL.md`.
 - Homes de juiz: **C3SL** `/home/ppginf/bcribas/moj-judge`; **chococino** `/home/prof/ribas/moj-judge`.
 - Tokens de worker têm prefixo `mojw_`; tokens do Gitea ficam `600` — **nunca ecoar** nenhum dos dois.
 - `macalan` (sshd IPv6) limita conexões rápidas — espace os SSH.
-- `bash -n` antes de commitar.
+- `bash -n` antes de commitar. Rodapé de commit: **só** `Co-Authored-By:`, **nunca** `Claude-Session:`.
