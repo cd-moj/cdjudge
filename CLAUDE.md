@@ -26,3 +26,5 @@ Detalhes: `cdmoj/server/judge-gw/PULL.md`.
 - Tokens de worker têm prefixo `mojw_`; tokens do Gitea ficam `600` — **nunca ecoar** nenhum dos dois.
 - `macalan` (sshd IPv6) limita conexões rápidas — espace os SSH.
 - `bash -n` antes de commitar. Rodapé de commit: **só** `Co-Authored-By:`, **nunca** `Claude-Session:`.
+- **Doc junto com o código** (doc atrasada = bug): mudou o protocolo pull/agente? atualize
+  `cdmoj/server/judge-gw/PULL.md` e os `CLAUDE.md` no mesmo commit.
