@@ -27,29 +27,31 @@ TOKEN="$(cat "$WORKER_TOKEN_FILE" 2>/dev/null)"   # nota: $(<f 2>/dev/null) some
 
 alog() { echo "[moj-agent $(date +%H:%M:%S)] $*" >&2; }
 
-# Raiz da jaula (sandbox): por PADRÃO usamos um ROOTFS reprodutível (Ubuntu 24.04 com os
-# compiladores), NÃO o host — assim todo juiz fica idêntico. Provisiona na 1ª vez via make-sysroot.sh.
-#   CAGE_ROOT ausente/vazio -> sysroot padrão ($MOJTOOLS_DIR/sysroot/rootfs)
+# Raiz da jaula (sandbox): por PADRÃO usamos o ROOTFS reprodutível JÁ MONTADO em $HOME/moj-sysroot
+# (o operador provisiona/monta; não recriamos), NÃO o host — assim todo juiz fica idêntico.
+#   CAGE_ROOT ausente/vazio -> $HOME/moj-sysroot (a convenção; já montado)
 #   CAGE_ROOT=host          -> força o toolchain do HOST (escape hatch)
 #   CAGE_ROOT=<dir>         -> esse rootfs específico
-#   AGENT_BUILD_ROOTFS=0    -> não tenta construir (cai p/ host se faltar)
+#   AGENT_BUILD_ROOTFS=1    -> se faltar, CONSTRÓI com make-sysroot.sh (precisa podman); default NÃO recria
 ensure_rootfs() {
   case "${CAGE_ROOT:-}" in
     host|HOST|/) alog "jaula: HOST (CAGE_ROOT=host) — toolchain não-reprodutível"; unset CAGE_ROOT; return 0;;
-    "")          CAGE_ROOT="$MOJTOOLS_DIR/sysroot/rootfs";;
+    "")          CAGE_ROOT="$HOME/moj-sysroot";;       # convenção: rootfs já montado no HOME
   esac
   if [[ -d "$CAGE_ROOT/usr" && -d "$CAGE_ROOT/etc" ]]; then
     export CAGE_ROOT; alog "jaula: rootfs $CAGE_ROOT"; return 0
   fi
+  # rootfs AUSENTE: por padrão NÃO recria (o moj-sysroot é montado/provisionado pelo operador).
+  # Só constrói sob demanda: AGENT_BUILD_ROOTFS=1 (com podman + make-sysroot).
   local log="${AGENT_ROOTFS_LOG:-/tmp/moj-sysroot.$AGENT_HOST.log}"
-  if [[ "${AGENT_BUILD_ROOTFS:-1}" != 0 ]] && command -v podman >/dev/null 2>&1 && [[ -f "$MOJTOOLS_DIR/make-sysroot.sh" ]]; then
-    alog "jaula: rootfs ausente em $CAGE_ROOT — construindo (make-sysroot.sh, 1x, pode demorar; log: $log)…"
+  if [[ "${AGENT_BUILD_ROOTFS:-0}" == 1 ]] && command -v podman >/dev/null 2>&1 && [[ -f "$MOJTOOLS_DIR/make-sysroot.sh" ]]; then
+    alog "jaula: rootfs ausente em $CAGE_ROOT — construindo (AGENT_BUILD_ROOTFS=1; log: $log)…"
     if bash "$MOJTOOLS_DIR/make-sysroot.sh" --out "$CAGE_ROOT" >>"$log" 2>&1 && [[ -d "$CAGE_ROOT/usr" ]]; then
       export CAGE_ROOT; alog "jaula: rootfs pronto em $CAGE_ROOT"; return 0
     fi
     alog "jaula: FALHA ao construir o rootfs (ver $log) — caindo p/ HOST"
   else
-    alog "jaula: sem rootfs e sem podman/make-sysroot (ou AGENT_BUILD_ROOTFS=0) — usando HOST"
+    alog "jaula: rootfs ausente em $CAGE_ROOT — não recrio (AGENT_BUILD_ROOTFS=1 p/ construir); usando HOST"
   fi
   unset CAGE_ROOT   # fallback seguro: ainda julga, mesmo que no host
   return 0
