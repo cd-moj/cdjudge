@@ -23,17 +23,16 @@ depender de NFS). Na 1ª vez calibra o problema e **reporta o TL** ao MOJ.
 
 ```
 judge/
-├── agent/                  # AGENTE (modelo pull) — o que se usa daqui pra frente
+├── agent/                  # AGENTE (modelo pull) — o juiz roda isto
 │   ├── moj-agent.sh        #   loop: register → heartbeat → (puxa job) → julga → POST result
 │   └── inventory.sh        #   coleta specs (CPU/mem/GPU) + inventário do cache
-├── update-problems.sh      # LEGADO: git pull + make (modelo NFS) — substituído pelo cache
-├── judge/                  # LEGADO (em retirada): root-daemon*, job-receiveitor* (listeners nc)
-├── sistema_escalonador/    # LEGADO (em retirada): master tcpserver + escalonador.sh
 ├── etc/agent.env.sample    # modelo de config do agente (copie p/ etc/agent.env)
-└── problems/               # (gitignored) LEGADO: árvore NFS — agora o cache fica em JUDGE_CACHE
+└── CLAUDE.md · README.md   # docs
 ```
 
-A migração do legado p/ o pull e a aposentadoria estão em **`server/judge-gw/PULL.md`** (repo moj).
+> O cluster legado (master tcpserver `:27000` + `root-daemon*`/`job-receiveitor*` + `escalonador`)
+> e o `update-problems.sh` (NFS) foram **removidos** — o modelo pull os substituiu. Histórico da
+> migração em **`server/judge-gw/PULL.md`** (repo moj).
 
 ## Pré-requisitos por máquina
 
@@ -137,12 +136,11 @@ Os juízes livres pegam os pedidos no heartbeat, baixam o pacote, calibram e **r
 o enunciado (HTML/`var/jsons`) roda **no servidor** (publish/webhook). Não precisa entrar em
 cada máquina, e um juiz novo se popula sozinho conforme julga.
 
-## Legado (durante a migração)
+## Legado (aposentado)
 
-Os `judge/root-daemon*.sh` + `job-receiveitor*.sh` (listeners `nc`) e o
-`sistema_escalonador/` (master) continuam funcionando como **fallback** enquanto o pull é
-validado. Para subir o legado, veja `judge/lancar-juizes.sh` / `sistema_escalonador/lancar-master.sh`.
-Sequência de migração e aposentadoria: **`server/judge-gw/PULL.md`** (repo moj).
+O cluster legado (`root-daemon*`/`job-receiveitor*` via `nc` + `sistema_escalonador/` master
+tcpserver `:27000`) foi **removido** deste repo — o modelo pull (acima) o substituiu. A sequência
+de migração/aposentadoria fica registrada em **`server/judge-gw/PULL.md`** (repo moj).
 
 ## Primeiro push deste repo
 

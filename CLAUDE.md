@@ -13,8 +13,10 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
     montado** (o operador provisiona/monta; o agente **não recria**). `CAGE_ROOT=host` força o host;
     `AGENT_BUILD_ROOTFS=1` manda construir com make-sysroot.sh se faltar (precisa podman). Ver `mojtools/SANDBOX.md`.
 - `agent/inventory.sh` — reporta CPU/linguagens ao registro.
-- `judge/` — daemons do **cluster** legado (master `:27000` + workers): `root-daemon*.sh`,
-  `job-receiveitor*.sh`, `lancar-juizes.sh`.
+- `etc/agent.env.sample` — modelo de config (copie p/ `etc/agent.env`, gitignored).
+
+> O cluster legado (master `:27000` + `root-daemon*`/`job-receiveitor*` + `sistema_escalonador/`)
+> foi **removido** — o modelo pull o substituiu. Histórico em `cdmoj/server/judge-gw/PULL.md`.
 
 ## Controle pull (o lado servidor vive em `cdmoj/server/judge-gw/`)
 
