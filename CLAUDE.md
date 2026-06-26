@@ -9,6 +9,9 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
 - `agent/moj-agent.sh` — o **agente** (modelo pull): conecta na API do MOJ, puxa jobs no
   **heartbeat**, baixa o pacote do problema sob demanda p/ um **cache local**
   (`JUDGE_CACHE`, default `~/.cache/moj/problems`), calibra na 1ª vez e **reporta o TL**.
+  - **Jaula no rootfs por padrão** (não no host): `ensure_rootfs` aponta `CAGE_ROOT` p/
+    `$MOJTOOLS_DIR/sysroot/rootfs` e o **constrói na 1ª vez** (make-sysroot.sh, requer podman).
+    `CAGE_ROOT=host` força o host; `AGENT_BUILD_ROOTFS=0` desliga o build automático. Ver `mojtools/SANDBOX.md`.
 - `agent/inventory.sh` — reporta CPU/linguagens ao registro.
 - `judge/` — daemons do **cluster** legado (master `:27000` + workers): `root-daemon*.sh`,
   `job-receiveitor*.sh`, `lancar-juizes.sh`.
