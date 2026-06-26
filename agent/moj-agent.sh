@@ -65,9 +65,14 @@ ensure_rootfs() {
 _HH=(); [[ -n "$MOJ_HOST_HEADER" ]] && _HH=(-H "Host: $MOJ_HOST_HEADER")
 [[ -n "$MOJ_RESOLVE" ]] && _HH+=(--resolve "$MOJ_RESOLVE")
 
-_api() {  # _api <path> <json-body> -> resposta no stdout (vazio em erro)
-  curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-    --data "$2" "$MOJ_API$1" 2>/dev/null
+_api() {  # _api <path> <json-body> -> resposta no stdout; resiliente (re-tenta um POST que falhou)
+  local i out                                  # antes: 1 tentativa -> um POST perdido sumia com o TL/log
+  for i in 1 2 3; do
+    out="$(curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      --data "$2" "$MOJ_API$1" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
+    sleep 2
+  done
+  return 1
 }
 _api_get() {  # _api_get <path> -> corpo no stdout
   curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" "$MOJ_API$1" 2>/dev/null
@@ -348,8 +353,14 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}
 
 # ----------------------------------------------------------------- loop principal
 moj_agent_main() {
-alog "subindo: host=$AGENT_HOST cap=$CAPABILITY api=$MOJ_API cache=$JUDGE_CACHE hb=${HEARTBEAT_SECS}s"
-ensure_rootfs        # jaula no rootfs reprodutível (não no host); provisiona na 1ª vez
+# instância ÚNICA por host: um flock evita agentes DUPLICADOS (brigam por jobs e gastam forks).
+exec 8>"${AGENT_LOCK:-/tmp/moj-agent.$AGENT_HOST.lock}"
+flock -n 8 || { alog "já há um agente rodando em $AGENT_HOST (lock $AGENT_LOCK) — saindo"; exit 0; }
+# host desabilitado (ex.: nproc baixo demais p/ a jaula): não vira juiz. `touch ~/.moj-agent-disabled`
+[[ -f "${AGENT_DISABLED:-$HOME/.moj-agent-disabled}" ]] && { alog "agente DESABILITADO neste host (${AGENT_DISABLED:-$HOME/.moj-agent-disabled}) — saindo"; exit 0; }
+ulimit -u "$(ulimit -Hu)" 2>/dev/null || true   # folga de processos: calibração forka bwrap+time+timeout
+alog "subindo: host=$AGENT_HOST cap=$CAPABILITY api=$MOJ_API cache=$JUDGE_CACHE hb=${HEARTBEAT_SECS}s ulimit-u=$(ulimit -u)"
+ensure_rootfs        # jaula no rootfs reprodutível (não no host)
 register
 report_cached_tls    # relançamento: reenvia os TLs já calibrados (sem recalibrar)
 BUSYPID=0   # pid do job/update rodando em background (0 = livre)
