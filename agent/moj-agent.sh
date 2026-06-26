@@ -77,6 +77,17 @@ _api() {  # _api <path> <json-body> -> resposta no stdout; resiliente (re-tenta 
 _api_get() {  # _api_get <path> -> corpo no stdout
   curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" "$MOJ_API$1" 2>/dev/null
 }
+_api_file() {  # _api_file <path> <bodyfile> : POST com o corpo vindo de ARQUIVO. Obrigatório p/
+  # payloads grandes (report.html em base64): um ÚNICO arg >128KB estoura MAX_ARG_STRLEN
+  # ("Argument list too long") e o POST se perdia em silêncio. Re-tenta como o _api.
+  local i
+  for i in 1 2 3; do
+    curl -fsS -m 60 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      --data-binary "@$2" "$MOJ_API$1" >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
 _api_get_file() {  # _api_get_file <path> <outfile> -> baixa (rc!=0 em erro)
   curl -fsS -m 180 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -o "$2" "$MOJ_API$1" 2>/dev/null
 }
@@ -117,8 +128,12 @@ report_calib_log() {
       reports="$(jq -c --arg n "$(basename "$rf" .html)" --rawfile h "$rf" '. + [{name:$n, html_b64:($h|@base64)}]' <<<"$reports" 2>/dev/null)" || reports='[]'
     done
   fi
-  _api /judge/calib-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" --argjson reports "$reports" \
-        '{host:$h, id:$id, checksum:$c, log:$log, reports:$reports}')" >/dev/null || true
+  # monta o corpo num ARQUIVO: os reports (grandes) entram por stdin no jq, nunca por argv.
+  local bf; bf="$(mktemp)"
+  printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
+        '{host:$h, id:$id, checksum:$c, log:$log, reports:.}' > "$bf" 2>/dev/null
+  [[ -s "$bf" ]] && _api_file /judge/calib-report "$bf"
+  rm -f "$bf"
 }
 
 # ensure_cached <id> [force_report] [full] : garante o pacote no cache p/ a versão ATUAL e que
@@ -193,8 +208,11 @@ report_cached_tls() {
     cks="$(jq -r '.checksum // empty' "$d/.moj-cache.json" 2>/dev/null)"
     [[ -n "$id" && -n "$cks" && -f "$d/pkg/tl.$AGENT_HOST" ]] || continue
     report_tl "$id" "$cks" "$d/pkg" && n=$((n+1))
+    # re-envia também o LOG da calibração (sem o pkgdir -> sem os report.html, fica leve) p/ a
+    # interface não perder o "ver log" de cada juiz depois que o agente reinicia.
+    [[ -f "$d/.calib.log" ]] && report_calib_log "$id" "$cks" "$d/.calib.log"
   done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
-  (( n > 0 )) && alog "re-reportei TL de $n problema(s) do cache"
+  (( n > 0 )) && alog "re-reportei TL+log de $n problema(s) do cache"
 }
 
 INVHASH=""
@@ -266,26 +284,26 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
 
   local CORRECT=0 TOTALTESTS=0 TOTALTIME=0 FINALRESP="$verdict" TL_LANG=""
   [[ -f "$wb/report.env" ]] && source "$wb/report.env" 2>/dev/null
-  local tests html_b64 score
+  local tests score
   tests="$(agent_tests_json "$wb" "$TL_LANG")"
-  html_b64=""; [[ -f "$wb/report.html" ]] && html_b64="$(base64 -w0 "$wb/report.html")"
   score="$(printf '%s' "$FINALRESP" | grep -oE '[0-9]+p$' | tr -d p)"; score="${score:-0}"
 
-  local payload
-  payload="$(jq -cn \
+  # corpo num ARQUIVO: o report.html (grande) entra por --rawfile (lido do arquivo) e vira base64
+  # dentro do jq — nunca por argv (>128KB estoura MAX_ARG_STRLEN e o result se perdia).
+  local bf htmlf; bf="$(mktemp)"; htmlf=/dev/null; [[ -f "$wb/report.html" ]] && htmlf="$wb/report.html"
+  jq -cn \
     --arg host "$AGENT_HOST" --arg id "$id" --arg c "$contest" --arg p "$problem" \
     --arg login "$login" --arg lang "$lang" --arg v "$verdict" \
     --argjson score "${score:-0}" --argjson correct "${CORRECT:-0}" \
     --argjson total "${TOTALTESTS:-0}" --argjson dur "${TOTALTIME:-0}" \
-    --arg tl "$TL_LANG" --argjson tests "$tests" --arg html "$html_b64" \
+    --arg tl "$TL_LANG" --argjson tests "$tests" --rawfile html "$htmlf" \
     '{host:$host, id:$id, contest:$c, problem_id:$p, login:$login, lang:$lang,
       verdict:$v, score:$score, correct:$correct, total_tests:$total, duration_s:$dur,
       tl_used:($tl|tonumber? // null), tests:$tests,
-      report_html_b64:(if $html=="" then null else $html end)}')"
-  _api /judge/result "$payload" >/dev/null \
-    && alog "result enviado id=$id verdict=$verdict" \
-    || alog "FALHA ao enviar result id=$id"
-  rm -rf "$work" "$wb" 2>/dev/null
+      report_html_b64:(if ($html|length)==0 then null else ($html|@base64) end)}' > "$bf" 2>/dev/null
+  if [[ -s "$bf" ]] && _api_file /judge/result "$bf"; then alog "result enviado id=$id verdict=$verdict"
+  else alog "FALHA ao enviar result id=$id"; fi
+  rm -f "$bf"; rm -rf "$work" "$wb" 2>/dev/null
 }
 
 run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de report)
