@@ -338,13 +338,18 @@ run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de 
   problems="$(agent_problems_json)"; pc="$(jq 'length' <<<"$problems")"
   INVHASH="$(agent_inv_hash "$problems")"
   okj=false; (( rc == 0 )) && okj=true
-  _api /judge/update-report "$(jq -cn --arg host "$AGENT_HOST" --arg reqid "$reqid" \
+  # log b64 + corpo em ARQUIVO -> --rawfile + _api_file: log grande estourava o ARG_MAX (no --arg
+  # do build E no --data do POST) e o report sumia em silêncio.
+  local lb64 urbody; lb64="$(mktemp)"; urbody="$(mktemp)"
+  base64 -w0 < "$logf" | tr -d '\n' > "$lb64"
+  jq -cn --arg host "$AGENT_HOST" --arg reqid "$reqid" \
     --arg repo "$repo" --arg kind "$kind" --arg target "$target" --argjson ok "$okj" \
-    --arg log "$(base64 -w0 < "$logf")" --argjson pc "${pc:-0}" --argjson val null \
+    --rawfile log "$lb64" --argjson pc "${pc:-0}" --argjson val null \
     '{host:$host, reqid:$reqid, repo:$repo, kind:$kind, target:$target, ok:$ok,
-      log_b64:$log, problems_count:$pc, validation:$val}')" >/dev/null \
+      log_b64:$log, problems_count:$pc, validation:$val}' > "$urbody"
+  _api_file /judge/update-report "$urbody" >/dev/null \
     && alog "report enviado reqid=$reqid kind=$kind ok=$okj" || alog "FALHA report reqid=$reqid"
-  rm -f "$logf"
+  rm -f "$logf" "$lb64" "$urbody"
   register   # re-registra o inventário atualizado (e volta a free)
 }
 
