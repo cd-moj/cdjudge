@@ -253,7 +253,8 @@ _post_judge_error() {  # $1=id $2=contest $3=problem $4=login $5=lang $6=msg
   _api /judge/result "$(jq -cn --arg host "$AGENT_HOST" --arg id "$1" --arg c "$2" \
      --arg p "$3" --arg login "$4" --arg lang "$5" --arg v "$6" \
      '{host:$host,id:$id,contest:$c,problem_id:$p,login:$login,lang:$lang,verdict:$v,
-       score:0,correct:0,total_tests:0,duration_s:0,tl_used:null,tests:[],report_html_b64:null}')" >/dev/null
+       verdict_canon:"Judge Error",
+       score:0,score_max:0,score_kind:"tests",correct:0,total_tests:0,duration_s:0,tl_used:null,tests:[],report_html_b64:null}')" >/dev/null
 }
 
 run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
@@ -283,22 +284,31 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   [[ -n "$verdict" ]] || verdict="Judge Error (no verdict)"
 
   local CORRECT=0 TOTALTESTS=0 TOTALTIME=0 FINALRESP="$verdict" TL_LANG=""
+  local VERDICT_CANON="" SCORE="" SCORE_MAX=100 SCORE_KIND=tests
   [[ -f "$wb/report.env" ]] && source "$wb/report.env" 2>/dev/null
-  local tests score
+  local tests score vcanon smax skind
   tests="$(agent_tests_json "$wb" "$TL_LANG")"
-  score="$(printf '%s' "$FINALRESP" | grep -oE '[0-9]+p$' | tr -d p)"; score="${score:-0}"
+  # canônico p/ casar o auto-veredicto (fallback: tira o sufixo ,Np do verdict); score do report.env
+  # (corrige subtarefas, onde o regex [0-9]+p$ falhava) com fallback p/ o regex no FINALRESP.
+  vcanon="${VERDICT_CANON:-${verdict%%,*}}"
+  score="${SCORE:-$(printf '%s' "$FINALRESP" | grep -oE '[0-9]+p$' | tr -d p)}"
+  [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
+  smax="${SCORE_MAX:-100}"; [[ "$smax" =~ ^[0-9]+$ ]] || smax=100
+  skind="${SCORE_KIND:-tests}"
 
   # corpo num ARQUIVO: o report.html (grande) entra por --rawfile (lido do arquivo) e vira base64
   # dentro do jq — nunca por argv (>128KB estoura MAX_ARG_STRLEN e o result se perdia).
   local bf htmlf; bf="$(mktemp)"; htmlf=/dev/null; [[ -f "$wb/report.html" ]] && htmlf="$wb/report.html"
   jq -cn \
     --arg host "$AGENT_HOST" --arg id "$id" --arg c "$contest" --arg p "$problem" \
-    --arg login "$login" --arg lang "$lang" --arg v "$verdict" \
-    --argjson score "${score:-0}" --argjson correct "${CORRECT:-0}" \
+    --arg login "$login" --arg lang "$lang" --arg v "$verdict" --arg vcanon "$vcanon" \
+    --argjson score "${score:-0}" --argjson smax "${smax:-100}" --arg skind "$skind" \
+    --argjson correct "${CORRECT:-0}" \
     --argjson total "${TOTALTESTS:-0}" --argjson dur "${TOTALTIME:-0}" \
     --arg tl "$TL_LANG" --argjson tests "$tests" --rawfile html "$htmlf" \
     '{host:$host, id:$id, contest:$c, problem_id:$p, login:$login, lang:$lang,
-      verdict:$v, score:$score, correct:$correct, total_tests:$total, duration_s:$dur,
+      verdict:$v, verdict_canon:$vcanon, score:$score, score_max:$smax, score_kind:$skind,
+      correct:$correct, total_tests:$total, duration_s:$dur,
       tl_used:($tl|tonumber? // null), tests:$tests,
       report_html_b64:(if ($html|length)==0 then null else ($html|@base64) end)}' > "$bf" 2>/dev/null
   if [[ -s "$bf" ]] && _api_file /judge/result "$bf"; then alog "result enviado id=$id verdict=$verdict"
