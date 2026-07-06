@@ -284,9 +284,9 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   [[ -n "$verdict" ]] || verdict="Judge Error (no verdict)"
 
   local CORRECT=0 TOTALTESTS=0 TOTALTIME=0 FINALRESP="$verdict" TL_LANG=""
-  local VERDICT_CANON="" SCORE="" SCORE_MAX=100 SCORE_KIND=tests
+  local VERDICT_CANON="" SCORE="" SCORE_MAX=100 SCORE_KIND=tests SCORE_GROUPS=""
   [[ -f "$wb/report.env" ]] && source "$wb/report.env" 2>/dev/null
-  local tests score vcanon smax skind
+  local tests score vcanon smax skind groups
   tests="$(agent_tests_json "$wb" "$TL_LANG")"
   # canônico p/ casar o auto-veredicto (fallback: tira o sufixo ,Np do verdict); score do report.env
   # (corrige subtarefas, onde o regex [0-9]+p$ falhava) com fallback p/ o regex no FINALRESP.
@@ -295,6 +295,9 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
   smax="${SCORE_MAX:-100}"; [[ "$smax" =~ ^[0-9]+$ ]] || smax=100
   skind="${SCORE_KIND:-tests}"
+  # grupos estruturados (subtarefas) do report.env; só repassa se for JSON array válido
+  groups=null
+  [[ -n "$SCORE_GROUPS" ]] && jq -e 'type=="array"' <<<"$SCORE_GROUPS" >/dev/null 2>&1 && groups="$SCORE_GROUPS"
 
   # corpo num ARQUIVO: o report.html (grande) entra por --rawfile (lido do arquivo) e vira base64
   # dentro do jq — nunca por argv (>128KB estoura MAX_ARG_STRLEN e o result se perdia).
@@ -305,12 +308,13 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
     --argjson score "${score:-0}" --argjson smax "${smax:-100}" --arg skind "$skind" \
     --argjson correct "${CORRECT:-0}" \
     --argjson total "${TOTALTESTS:-0}" --argjson dur "${TOTALTIME:-0}" \
-    --arg tl "$TL_LANG" --argjson tests "$tests" --rawfile html "$htmlf" \
+    --arg tl "$TL_LANG" --argjson tests "$tests" --argjson groups "$groups" --rawfile html "$htmlf" \
     '{host:$host, id:$id, contest:$c, problem_id:$p, login:$login, lang:$lang,
       verdict:$v, verdict_canon:$vcanon, score:$score, score_max:$smax, score_kind:$skind,
       correct:$correct, total_tests:$total, duration_s:$dur,
       tl_used:($tl|tonumber? // null), tests:$tests,
-      report_html_b64:(if ($html|length)==0 then null else ($html|@base64) end)}' > "$bf" 2>/dev/null
+      report_html_b64:(if ($html|length)==0 then null else ($html|@base64) end)}
+     + (if $groups == null then {} else {groups:$groups} end)' > "$bf" 2>/dev/null
   if [[ -s "$bf" ]] && _api_file /judge/result "$bf"; then alog "result enviado id=$id verdict=$verdict"
   else alog "FALHA ao enviar result id=$id"; fi
   rm -f "$bf"; rm -rf "$work" "$wb" 2>/dev/null
