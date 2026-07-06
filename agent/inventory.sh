@@ -33,7 +33,7 @@ declare -A _LANGBIN=(
   [c]="gcc" [cpp]="g++" [java]="javac" [py3]="python3" [py2]="python python2"
   [go]="gccgo go" [rs]="rustc" [hs]="ghc" [cs]="mcs mono-csc csc" [pas]="fpc"
   [pl]="swipl prolog pl" [js]="node nodejs" [ml]="ocamlopt ocaml" [spim]="spim"
-  [apl]="dyalog mapl apl" [riscv]="java" [sh]="bash"
+  [apl]="dyalog mapl apl" [riscv]="java" [sh]="bash" [kt]="kotlinc"
 )
 agent_langs_json() {
   local l b ok first=1 out='[' root="${CAGE_ROOT:-}"
