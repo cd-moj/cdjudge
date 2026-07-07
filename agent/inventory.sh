@@ -4,14 +4,32 @@
 
 : "${JUDGE_CACHE:=$HOME/.cache/moj/problems}"   # cache local de pacotes (modelo cache)
 
-_detect_gpu() {  # ecoa um JSON {vendor,names} ou null
+_detect_gpu() {  # ecoa {vendor,names} SÓ com GPU de COMPUTE comprovada; senão null.
+  # Regra: só nvidia-smi/rocm-smi RESPONDENDO (exit 0 + saída válida) contam — driver
+  # carregado e stack de computação acessível. Nada de lspci: adaptador de display
+  # (Virtio/Matrox/…) não é GPU de compute, e nvidia-smi com driver quebrado ecoa a
+  # MENSAGEM DE ERRO (que já virou "gpu nvidia" no registro).
+  local n rc
   if command -v nvidia-smi >/dev/null 2>&1; then
-    local n; n="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | paste -sd';' -)"
-    [[ -n "$n" ]] && { jq -cn --arg n "$n" '{vendor:"nvidia", names:$n}'; return; }
+    # com capacidade de computação explícita (compute_cap; drivers novos)
+    n="$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null)"; rc=$?
+    if (( rc == 0 )); then
+      n="$(printf '%s\n' "$n" | awk -F', *' 'NF>=2 && $2 ~ /^[0-9]/ {printf "%s%s (cc %s)", (o?";":""), $1, $2; o=1}')"
+      [[ -n "$n" ]] && { jq -cn --arg n "$n" '{vendor:"nvidia", names:$n}'; return; }
+    fi
+    # driver antigo sem o campo compute_cap: nvidia-smi ok (exit 0) já comprova acesso CUDA
+    n="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"; rc=$?
+    if (( rc == 0 )); then
+      n="$(printf '%s\n' "$n" | grep -v '^[[:space:]]*$' | paste -sd';' -)"
+      [[ -n "$n" ]] && { jq -cn --arg n "$n" '{vendor:"nvidia", names:$n}'; return; }
+    fi
   fi
-  if command -v lspci >/dev/null 2>&1; then
-    local v; v="$(lspci 2>/dev/null | grep -iE 'vga|3d controller|display' | cut -d: -f3- | paste -sd';' - | sed 's/^ //')"
-    [[ -n "$v" ]] && { jq -cn --arg n "$v" '{vendor:"other", names:$n}'; return; }
+  if command -v rocm-smi >/dev/null 2>&1; then
+    # rocm-smi listando placa(s) = stack ROCm de compute acessível
+    n="$(rocm-smi --showproductname --json 2>/dev/null \
+         | jq -r '[.[] | objects | (."Card series" // ."Card model" // ."GFX Version" // empty)]
+                  | select(length>0) | join(";")' 2>/dev/null)"
+    [[ -n "$n" ]] && { jq -cn --arg n "$n" '{vendor:"amd", names:$n}'; return; }
   fi
   echo null
 }

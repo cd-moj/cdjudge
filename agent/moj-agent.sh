@@ -221,7 +221,14 @@ register() {
   specs="$(agent_specs_json)"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
   INVHASH="$(agent_inv_hash "$problems")"
   local cbytes; cbytes="$(du -sb "$JUDGE_CACHE" 2>/dev/null | cut -f1)"; [[ "$cbytes" =~ ^[0-9]+$ ]] || cbytes=0
-  body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$CAPABILITY" \
+  # capability 'gpu' exige GPU de COMPUTE comprovada (nvidia-smi/rocm-smi respondendo);
+  # sem ela registra como 'pos' — job com need_capability=gpu nunca cai em host cego.
+  local cap="$CAPABILITY"
+  if [[ "$cap" == gpu && "$(jq -c '.gpu // null' <<<"$specs")" == null ]]; then
+    alog "CAPABILITY=gpu mas nenhuma GPU de compute detectada (nvidia-smi/rocm-smi) — registrando como pos"
+    cap=pos
+  fi
+  body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$cap" \
     --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" \
     --arg cage "${CAGE_ROOT:-}" --argjson cb "$cbytes" --arg ih "$INVHASH" \
     '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs,

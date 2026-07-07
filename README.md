@@ -38,7 +38,9 @@ judge/
 
 `bash`, `jq`, `curl`, `git`, **`bubblewrap` (`bwrap`)** (sandbox), `/usr/bin/time`, e os
 compiladores/runtimes das linguagens que a máquina vai julgar (gcc/g++, python3, openjdk, …).
-Máquinas **GPU**: `nvidia-smi` (a detecção de GPU usa ele; cai p/ `lspci`).
+Máquinas **GPU**: a detecção exige **compute comprovado** — `nvidia-smi` (exit 0; com
+`compute_cap` quando o driver expõe) ou `rocm-smi` respondendo. **Sem fallback de `lspci`**
+(adaptador de display não é GPU de compute); driver quebrado = sem GPU no registro.
 
 > **Toolchain reprodutível (opcional):** em vez de instalar compiladores no host, a jaula pode
 > rodar a partir de um **rootfs** (ex.: Ubuntu 24.04 com tudo). Construa com `make-sysroot.sh`
@@ -125,7 +127,9 @@ curl -s -H "Authorization: Bearer <admin-token>" \
 
 `CAPABILITY` = `pos` (CPU padrão) · `gpu` · `cm` (compiladores) · `hu`. Um job com
 `need_capability` definido só é entregue a máquinas daquela capacidade; sem isso, qualquer
-uma. Rode um `moj-agent@<cap>` por capacidade da máquina.
+uma. Rode um `moj-agent@<cap>` por capacidade da máquina. **`gpu` exige GPU de compute
+comprovada** (`nvidia-smi`/`rocm-smi` respondendo): sem ela o agente (e o servidor, no
+registro) rebaixam a capability p/ `pos` — job de GPU nunca cai em host cego.
 
 ## Atualizar os problemas (pela plataforma)
 
