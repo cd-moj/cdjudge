@@ -30,7 +30,7 @@ agent_specs_json() {
 # O escalonador usa isso p/ rotear cada submissão a um juiz com o toolchain dela (route
 # by language). Valores são alternativas (basta UMA existir). 'sh' é sempre suportado.
 declare -A _LANGBIN=(
-  [c]="gcc" [cpp]="g++" [java]="javac" [py3]="python3" [py2]="python python2"
+  [c]="gcc" [cpp]="g++" [java]="javac" [py]="pypy3 python3"
   [go]="gccgo go" [rs]="rustc" [hs]="ghc" [cs]="mcs mono-csc csc" [pas]="fpc"
   [pl]="swipl prolog pl" [js]="node nodejs" [ml]="ocamlopt ocaml" [spim]="spim"
   [apl]="dyalog mapl apl" [riscv]="java" [sh]="bash" [kt]="kotlinc"
