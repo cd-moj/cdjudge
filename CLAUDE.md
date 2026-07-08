@@ -9,6 +9,15 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
 - `agent/moj-agent.sh` — o **agente** (modelo pull): conecta na API do MOJ, puxa jobs no
   **heartbeat**, baixa o pacote do problema sob demanda p/ um **cache local**
   (`JUDGE_CACHE`, default `~/.cache/moj/problems`), calibra na 1ª vez e **reporta o TL**.
+  - **GC do cache**: cada uso carimba `$cdir/.last-used`; a cada `AGENT_CACHE_GC_HOURS` (6)
+    com o juiz LIVRE, pacote sem uso há `AGENT_CACHE_MAX_DAYS` (14; 0=off) vira **STUB** —
+    `pkg/` sai, `.moj-cache.json` + `tl.$host` ficam (o TL segue re-reportado no boot e é
+    **restaurado sem recalibrar** no próximo uso com o MESMO checksum; checksum novo =
+    recalibra como sempre). Teto opcional `AGENT_CACHE_MAX_MB` (evict LRU). O sweep respeita
+    o flock por-problema e pula downloads em curso.
+  - **Token nunca no argv**: os curls usam `curl -K <authfile>` (config 600 em
+    `$XDG_RUNTIME_DIR`/`/dev/shm`, removido no EXIT) — `ps`/`/proc/*/cmdline` não veem o
+    `mojw_…`; o `TOKEN` também é `unset` após montar o arquivo (não vaza em `/proc/*/environ`).
   - **Jaula no rootfs por padrão** (não no host): `ensure_rootfs` usa o **`$HOME/moj-sysroot` já
     montado** (o operador provisiona/monta; o agente **não recria**). `CAGE_ROOT=host` força o host;
     `AGENT_BUILD_ROOTFS=1` manda construir com make-sysroot.sh se faltar (precisa podman). Ver `mojtools/SANDBOX.md`.

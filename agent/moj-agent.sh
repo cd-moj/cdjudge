@@ -24,6 +24,14 @@ mkdir -p "$JUDGE_CACHE" 2>/dev/null
 
 TOKEN="$(cat "$WORKER_TOKEN_FILE" 2>/dev/null)"   # nota: $(<f 2>/dev/null) some com o conteúdo
 [[ -n "$TOKEN" ]] || { echo "moj-agent: sem worker token em $WORKER_TOKEN_FILE" >&2; exit 1; }
+# O token NUNCA vai no argv do curl: `-H "…Bearer $TOKEN"` aparece em /proc/*/cmdline (ps) p/
+# QUALQUER usuário da máquina. Vai num config-file 600 (curl -K) criado uma vez; e some do
+# ambiente (o `set -a` do run-agent exportaria TOKEN a todos os filhos -> /proc/*/environ).
+AUTH_CFG="$(umask 077; mktemp "${XDG_RUNTIME_DIR:-/dev/shm}/moj-agent-auth.XXXXXX" 2>/dev/null || mktemp)"
+printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" > "$AUTH_CFG"
+trap 'rm -f "$AUTH_CFG"' EXIT
+unset TOKEN
+_AUTH=(-K "$AUTH_CFG")
 
 alog() { echo "[moj-agent $(date +%H:%M:%S)] $*" >&2; }
 
@@ -68,28 +76,28 @@ _HH=(); [[ -n "$MOJ_HOST_HEADER" ]] && _HH=(-H "Host: $MOJ_HOST_HEADER")
 _api() {  # _api <path> <json-body> -> resposta no stdout; resiliente (re-tenta um POST que falhou)
   local i out                                  # antes: 1 tentativa -> um POST perdido sumia com o TL/log
   for i in 1 2 3; do
-    out="$(curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    out="$(curl -fsS -m 30 "${_HH[@]}" "${_AUTH[@]}" -H 'Content-Type: application/json' \
       --data "$2" "$MOJ_API$1" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
     sleep 2
   done
   return 1
 }
 _api_get() {  # _api_get <path> -> corpo no stdout
-  curl -fsS -m 30 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" "$MOJ_API$1" 2>/dev/null
+  curl -fsS -m 30 "${_HH[@]}" "${_AUTH[@]}" "$MOJ_API$1" 2>/dev/null
 }
 _api_file() {  # _api_file <path> <bodyfile> : POST com o corpo vindo de ARQUIVO. Obrigatório p/
   # payloads grandes (report.html em base64): um ÚNICO arg >128KB estoura MAX_ARG_STRLEN
   # ("Argument list too long") e o POST se perdia em silêncio. Re-tenta como o _api.
   local i
   for i in 1 2 3; do
-    curl -fsS -m 60 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    curl -fsS -m 60 "${_HH[@]}" "${_AUTH[@]}" -H 'Content-Type: application/json' \
       --data-binary "@$2" "$MOJ_API$1" >/dev/null 2>&1 && return 0
     sleep 2
   done
   return 1
 }
 _api_get_file() {  # _api_get_file <path> <outfile> -> baixa (rc!=0 em erro)
-  curl -fsS -m 180 "${_HH[@]}" -H "Authorization: Bearer $TOKEN" -o "$2" "$MOJ_API$1" 2>/dev/null
+  curl -fsS -m 180 "${_HH[@]}" "${_AUTH[@]}" -o "$2" "$MOJ_API$1" 2>/dev/null
 }
 _uri() { jq -rn --arg s "$1" '$s|@uri'; }   # url-encode (id tem '#')
 
@@ -156,6 +164,7 @@ ensure_cached() {
         && jq -c --argjson now "$EPOCHSECONDS" '.tl_reported=true|.reported_at=$now' "$meta" >"$meta.t" 2>/dev/null \
         && mv -f "$meta.t" "$meta"
     fi
+    echo "$EPOCHSECONDS" > "$cdir/.last-used" 2>/dev/null   # carimbo de USO (o GC decide por ele)
     printf '%s' "$cdir/pkg"; return 0
   fi
 
@@ -177,42 +186,125 @@ ensure_cached() {
       rm -rf "$cdir/.new"
       rm -rf "$cdir/pkg"; mv "$cdir/pkg.tmp" "$cdir/pkg" 2>/dev/null
     fi
-    # calibra (gera tl.$AGENT_HOST) e reporta. full=1 (Calibrar explícito) roda TODAS as soluções
-    # (good/pass/slow/wrong) p/ o log mostrar o comportamento de cada uma; senão só as good
-    # (rápido, sob demanda). Robusto a toolchain ausente (pula a linguagem, não aborta).
-    if [[ "$full" == 1 ]]; then
-      MOJ_PROBLEM_ID="$id" bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+    # STUB do GC: se o TL deste MESMO checksum foi preservado ($cdir/tl.$AGENT_HOST) quando o
+    # pkg/ foi removido por idade, restaura e PULA a recalibração (o GC não custa recalibrar).
+    if [[ "$full" != 1 && ! -f "$cdir/pkg/tl.$AGENT_HOST" && -f "$cdir/tl.$AGENT_HOST" && "$lc" == "$sc" ]]; then
+      cp -f "$cdir/tl.$AGENT_HOST" "$cdir/pkg/tl.$AGENT_HOST" 2>/dev/null
+      rm -f "$cdir/tl.$AGENT_HOST"
+      report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
+      local calat; calat="$(jq -r '.calibrated_at // empty' "$meta" 2>/dev/null)"; [[ "$calat" =~ ^[0-9]+$ ]] || calat="$EPOCHSECONDS"
+      jq -cn --arg id "$id" --arg c "$sc" --argjson cal "$calat" --argjson now "$EPOCHSECONDS" \
+         '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$cal, reported_at:$now}' > "$meta"
+      alog "tl restaurado do stub p/ $id (cks=${sc:0:8}; sem recalibrar)"
     else
-      MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+      # calibra (gera tl.$AGENT_HOST) e reporta. full=1 (Calibrar explícito) roda TODAS as soluções
+      # (good/pass/slow/wrong) p/ o log mostrar o comportamento de cada uma; senão só as good
+      # (rápido, sob demanda). Robusto a toolchain ausente (pula a linguagem, não aborta).
+      if [[ "$full" == 1 ]]; then
+        MOJ_PROBLEM_ID="$id" bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+      else
+        MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
+      fi
+      [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
+      rm -f "$cdir/tl.$AGENT_HOST"   # stub de checksum antigo (se havia) não vale mais
+      report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
+      report_calib_log "$id" "$sc" "$cdir/.calib.log" "$cdir/pkg"
+      jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
+         '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$now, reported_at:$now}' > "$meta"
+      alog "cacheado+calibrado $id (cks=${sc:0:8})"
     fi
-    [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
-    report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
-    report_calib_log "$id" "$sc" "$cdir/.calib.log" "$cdir/pkg"
-    jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
-       '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$now, reported_at:$now}' > "$meta"
-    alog "cacheado+calibrado $id (cks=${sc:0:8})"
   ) 9>"$cdir.lock"
 
   [[ -d "$cdir/pkg" && -f "$cdir/pkg/tl.$AGENT_HOST" ]] || return 1
+  echo "$EPOCHSECONDS" > "$cdir/.last-used" 2>/dev/null   # carimbo de USO (o GC decide por ele)
   printf '%s' "$cdir/pkg"
 }
 
 # report_cached_tls : ao subir/relançar, re-reporta o TL de todos os problemas do cache
-# já calibrados (o MOJ repovoa o TL por host sem recalibrar).
+# já calibrados (o MOJ repovoa o TL por host sem recalibrar) — inclusive STUBS do GC
+# (pkg/ removido, tl.$AGENT_HOST preservado ao lado do meta).
 report_cached_tls() {
-  local d id cks n=0
+  local d id cks tldir n=0
   [[ -d "$JUDGE_CACHE" ]] || return 0
   while IFS= read -r d; do
-    [[ -f "$d/.moj-cache.json" && -d "$d/pkg" ]] || continue
+    [[ -f "$d/.moj-cache.json" ]] || continue
     id="$(jq -r '.id // empty' "$d/.moj-cache.json" 2>/dev/null)"
     cks="$(jq -r '.checksum // empty' "$d/.moj-cache.json" 2>/dev/null)"
-    [[ -n "$id" && -n "$cks" && -f "$d/pkg/tl.$AGENT_HOST" ]] || continue
-    report_tl "$id" "$cks" "$d/pkg" && n=$((n+1))
+    [[ -n "$id" && -n "$cks" ]] || continue
+    if [[ -d "$d/pkg" && -f "$d/pkg/tl.$AGENT_HOST" ]]; then tldir="$d/pkg"
+    elif [[ -f "$d/tl.$AGENT_HOST" ]]; then tldir="$d"        # stub do GC
+    else continue; fi
+    report_tl "$id" "$cks" "$tldir" && n=$((n+1))
     # re-envia também o LOG da calibração (sem o pkgdir -> sem os report.html, fica leve) p/ a
     # interface não perder o "ver log" de cada juiz depois que o agente reinicia.
     [[ -f "$d/.calib.log" ]] && report_calib_log "$id" "$cks" "$d/.calib.log"
   done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
   (( n > 0 )) && alog "re-reportei TL+log de $n problema(s) do cache"
+}
+
+# ----------------------------------------------------------------- GC do cache
+# Pacote sem USO há AGENT_CACHE_MAX_DAYS vira STUB: o pkg/ (pesado: tests/sols/binários de
+# checker) é removido, mas .moj-cache.json + tl.$AGENT_HOST ficam (~KB) — o TL continua sendo
+# re-reportado no boot e, no próximo uso com o MESMO checksum, o ensure_cached re-baixa o
+# pacote e RESTAURA o TL sem recalibrar. Knobs (agent.env):
+#   AGENT_CACHE_MAX_DAYS  idade de uso p/ expirar (default 14; 0 = desliga por idade)
+#   AGENT_CACHE_MAX_MB    teto do cache; acima disso evict LRU (default 0 = sem teto)
+#   AGENT_CACHE_GC_HOURS  intervalo entre varreduras (default 6)
+: "${AGENT_CACHE_MAX_DAYS:=14}"
+: "${AGENT_CACHE_MAX_MB:=0}"
+: "${AGENT_CACHE_GC_HOURS:=6}"
+GC_STAMP="${TMPDIR:-/tmp}/moj-agent-gc.$AGENT_HOST.stamp"
+
+_gc_stub_one() {  # $1=cdir -> 0 se virou stub (preserva tl+meta; remove pkg/)
+  local d="$1" id szmb
+  [[ -d "$d/pkg" ]] || return 1
+  [[ -e "$d/.new" || -e "$d/pkg.tmp" ]] && return 1          # download em curso
+  (
+    flock -n 9 || exit 1                                      # ensure_cached concorrente
+    [[ -d "$d/pkg" ]] || exit 1
+    id="$(jq -r '.id // empty' "$d/.moj-cache.json" 2>/dev/null)"
+    szmb="$(du -sm "$d/pkg" 2>/dev/null | cut -f1)"
+    [[ -f "$d/pkg/tl.$AGENT_HOST" ]] && cp -f "$d/pkg/tl.$AGENT_HOST" "$d/tl.$AGENT_HOST" 2>/dev/null
+    rm -rf "$d/pkg" "$d/.calib.log"
+    alog "[gc] ${id:-$(basename "$d")}: pkg removido (${szmb:-?}MB; tl preservado no stub)"
+  ) 9>"$d.lock"
+}
+
+gc_cache() {  # chamado no loop SÓ com BUSYPID==0 (nenhum julgamento em curso); throttle por stamp
+  local now="$EPOCHSECONDS" last=0
+  [[ -f "$GC_STAMP" ]] && last="$(cat "$GC_STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last < AGENT_CACHE_GC_HOURS*3600 )) && return 0
+  echo "$now" > "$GC_STAMP" 2>/dev/null
+  local d used cut n=0
+  # 1) por idade de uso (.last-used; fallback: mtime do meta = época do download/calibração)
+  if (( AGENT_CACHE_MAX_DAYS > 0 )); then
+    cut=$(( now - AGENT_CACHE_MAX_DAYS*86400 ))
+    while IFS= read -r d; do
+      [[ -d "$d/pkg" ]] || continue
+      used="$(cat "$d/.last-used" 2>/dev/null)"
+      [[ "$used" =~ ^[0-9]+$ ]] || used="$(stat -c %Y "$d/.moj-cache.json" 2>/dev/null)"
+      [[ "$used" =~ ^[0-9]+$ ]] || used="$now"
+      (( used < cut )) && _gc_stub_one "$d" && n=$((n+1))
+    done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  fi
+  # 2) teto de tamanho: evict LRU (mais antigo .last-used primeiro) até caber
+  if (( AGENT_CACHE_MAX_MB > 0 )); then
+    local total szmb u
+    total="$(du -sm "$JUDGE_CACHE" 2>/dev/null | cut -f1)"; [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    if (( total > AGENT_CACHE_MAX_MB )); then
+      while IFS=$'\t' read -r u d; do
+        (( total <= AGENT_CACHE_MAX_MB )) && break
+        [[ -d "$d/pkg" ]] || continue
+        szmb="$(du -sm "$d/pkg" 2>/dev/null | cut -f1)"; [[ "$szmb" =~ ^[0-9]+$ ]] || szmb=0
+        _gc_stub_one "$d" && { total=$((total-szmb)); n=$((n+1)); }
+      done < <(while IFS= read -r d; do
+                 u="$(cat "$d/.last-used" 2>/dev/null)"; [[ "$u" =~ ^[0-9]+$ ]] || u=0
+                 printf '%s\t%s\n' "$u" "$d"
+               done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null) | sort -n)
+    fi
+  fi
+  (( n > 0 )) && { alog "[gc] $n pacote(s) viraram stub"; register; }
+  return 0
 }
 
 INVHASH=""
@@ -411,6 +503,7 @@ BUSYPID=0   # pid do job/update rodando em background (0 = livre)
 while true; do
   if (( BUSYPID != 0 )) && ! kill -0 "$BUSYPID" 2>/dev/null; then BUSYPID=0; fi
   state=free; (( BUSYPID != 0 )) && state=busy
+  (( BUSYPID == 0 )) && gc_cache   # GC só com o juiz LIVRE (throttle interno de 6h)
 
   resp="$(_api /judge/heartbeat \
     "$(jq -cn --arg h "$AGENT_HOST" --arg s "$state" --arg ih "$INVHASH" \
