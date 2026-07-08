@@ -44,6 +44,18 @@ agent_specs_json() {
      '{arch:$arch, cpu:$cpu, ncpu:$ncpu, mem_kb:$mem, gpu:$gpu}'
 }
 
+# topologia NUMA por /sys (sem numactl): [{node:0, cpus:"0-15,32-47"}, …]. Vazio se /sys
+# não expõe nodes (VM mínima) — o particionador cai p/ "cpus:X" sobre as cpus online.
+agent_topology_json() {
+  local n out='[]' cl
+  for n in /sys/devices/system/node/node[0-9]*; do
+    [[ -d "$n" && -f "$n/cpulist" ]] || continue
+    cl="$(<"$n/cpulist")"
+    out="$(jq -c --argjson i "${n##*node}" --arg c "$cl" '. + [{node:$i, cpus:$c}]' <<<"$out" 2>/dev/null)" || out='[]'
+  done
+  printf '%s' "$out"
+}
+
 # linguagens que ESTE host consegue julgar = lang-dirs cujo binário principal existe.
 # O escalonador usa isso p/ rotear cada submissão a um juiz com o toolchain dela (route
 # by language). Valores são alternativas (basta UMA existir). 'sh' é sempre suportado.

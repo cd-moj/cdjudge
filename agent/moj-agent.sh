@@ -323,9 +323,12 @@ register() {
   body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$cap" \
     --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" \
     --arg cage "${CAGE_ROOT:-}" --argjson cb "$cbytes" --arg ih "$INVHASH" \
+    --argjson ts "${N_SLOTS:-1}" --arg part "${CFG_PARTITION:-off}" \
+    --argjson topo "$(agent_topology_json)" \
     '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs,
                cage_root:(if $cage=="" then null else $cage end),
-               cache_bytes:$cb, inv_hash:$ih}')"
+               cache_bytes:$cb, inv_hash:$ih,
+               total_slots:$ts, partition:$part, topology:$topo}')"
   _api /judge/register "$body" >/dev/null \
     && alog "registrado ($(jq -r 'length' <<<"$problems") problemas, $(jq -r 'length' <<<"$langs") linguagens, inv=$INVHASH)" \
     || alog "falha ao registrar"
@@ -356,8 +359,11 @@ _post_judge_error() {  # $1=id $2=contest $3=problem $4=login $5=lang $6=msg
        score:0,score_max:0,score_kind:"tests",correct:0,total_tests:0,duration_s:0,tl_used:null,tests:[],report_html_b64:null}')" >/dev/null
 }
 
-run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
-  local job="$1" id contest problem login lang filename code_b64
+run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o próprio POST de result)
+  local job="$1" cpuset="${2:-}" id contest problem login lang filename code_b64
+  # pina ESTE subshell ao cpuset do slot: a afinidade herda p/ TUDO que o job forkar
+  # (ensure_cached/calibreitor, build-and-test, bwrap, compilador, solução)
+  [[ -n "$cpuset" ]] && taskset -pc "$cpuset" $BASHPID >/dev/null 2>&1
   id="$(jq -r '.id // empty' <<<"$job")"
   contest="$(jq -r '.contest // empty' <<<"$job")"
   problem="$(jq -r '.problem_id // empty' <<<"$job")"
@@ -419,8 +425,9 @@ run_job() {  # $1 = job JSON (roda em background; faz o próprio POST de result)
   rm -f "$bf"; rm -rf "$work" "$wb" 2>/dev/null
 }
 
-run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de report)
-  local upd="$1" reqid repo kind target logf rc okj problems pc
+run_update() {  # $1 = request JSON  $2 = cpuset do slot ("" = sem pin)  (bg; POST de report)
+  local upd="$1" cpuset="${2:-}" reqid repo kind target logf rc okj problems pc
+  [[ -n "$cpuset" ]] && taskset -pc "$cpuset" $BASHPID >/dev/null 2>&1   # calibração nas MESMAS condições do julgamento
   reqid="$(jq -r '.reqid // empty' <<<"$upd")"
   repo="$(jq -r '.repo // ""' <<<"$upd")"
   kind="$(jq -r '.kind // "calibrate"' <<<"$upd")"
@@ -466,9 +473,11 @@ run_update() {  # $1 = request JSON (roda em background; faz o próprio POST de 
   register   # re-registra o inventário atualizado (e volta a free)
 }
 
-# comando por-host vindo do admin (heartbeat). Hoje: limpar o cache local.
-run_command() {  # $1 = command JSON {cmdid, action, ...}
-  local c="$1" action; action="$(jq -r '.action // empty' <<<"$c" 2>/dev/null)"
+# comando por-host vindo do admin (heartbeat). clearcache é EXCLUSIVO (o loop só o executa
+# com todos os slots drenados); calibrate roda num slot como um job (pinado).
+run_command() {  # $1 = command JSON {cmdid, action, ...}  $2 = cpuset do slot ("" = sem pin)
+  local c="$1" cpuset="${2:-}" action; action="$(jq -r '.action // empty' <<<"$c" 2>/dev/null)"
+  [[ -n "$cpuset" ]] && taskset -pc "$cpuset" $BASHPID >/dev/null 2>&1
   case "$action" in
     clearcache)
       alog "comando do admin: limpar cache ($JUDGE_CACHE)"
@@ -479,7 +488,7 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}
     calibrate)   # calibração DIRECIONADA a este host (full): baixa/recalibra e reporta
       local target; target="$(jq -r '.id // empty' <<<"$c" 2>/dev/null)"
       if [[ -n "$target" ]]; then
-        alog "comando: calibrar $target (full) neste host"
+        alog "comando: calibrar $target (full) neste host${cpuset:+ [cpus $cpuset]}"
         ensure_cached "$target" 1 1 >/dev/null 2>&1 && alog "calibrado $target" || alog "calibrate $target falhou"
       else alog "comando calibrate sem id"; fi
       ;;
@@ -487,42 +496,154 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}
   esac
 }
 
+# ----------------------------------------------------------------- slots (particionamento)
+# A máquina pode ser PARTICIONADA em N slots de cpus DISJUNTAS e corrigir N problemas ao
+# mesmo tempo, cada job PINADO no seu cpuset (taskset herda p/ bwrap/compilador/solução; o
+# nproc dentro da fatia limita sozinho o paralelismo interno de testes; a calibração roda
+# pinada nas MESMAS condições). Config por juiz vem do SERVIDOR via heartbeat
+# ({config:{partition,reserve,disabled}, cfg_hash}) e vence o fallback local
+# AGENT_PARTITION/AGENT_RESERVE do agent.env. partition: off | numa | cpus:<X>.
+: "${AGENT_PARTITION:=off}"
+: "${AGENT_RESERVE:=0}"
+declare -a SLOT_CPUS=() SLOT_PID=()
+CFG_PARTITION="$AGENT_PARTITION" CFG_RESERVE="$AGENT_RESERVE" CFG_DISABLED=false
+AGENT_CFG_HASH=""    # hash da config aplicada (o servidor reenvia quando muda)
+PENDING_CFG=""       # config nova aguardando DRENAGEM dos slots p/ aplicar
+PENDING_CMD=""       # comando exclusivo (clearcache) aguardando drenagem
+
+_cpus_expand() {  # "0-3,8,10-11" -> "0 1 2 3 8 10 11"
+  local part a b i out=() _parts
+  IFS=',' read -ra _parts <<<"$1"
+  for part in "${_parts[@]}"; do
+    if [[ "$part" == *-* ]]; then a="${part%-*}"; b="${part#*-}"; for ((i=a; i<=b; i++)); do out+=("$i"); done
+    else out+=("$part"); fi
+  done
+  printf '%s ' "${out[@]}"
+}
+
+# build_slots <partition> <reserve> -> popula SLOT_CPUS/SLOT_PID. off = 1 slot sem pin.
+build_slots() {
+  local mode="${1:-off}" reserve="${2:-0}"
+  [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
+  SLOT_CPUS=(); SLOT_PID=()
+  case "$mode" in
+    numa)
+      local n cl cpus
+      for n in /sys/devices/system/node/node[0-9]*; do
+        [[ -f "$n/cpulist" ]] || continue
+        # reserve tira as N primeiras cpus DO HOST (só afeta o node que as contém)
+        read -ra cpus <<<"$(_cpus_expand "$(<"$n/cpulist")")"
+        local kept=() c
+        for c in "${cpus[@]}"; do (( c >= reserve )) && kept+=("$c"); done
+        (( ${#kept[@]} > 0 )) && { SLOT_CPUS+=("$(IFS=,; echo "${kept[*]}")"); SLOT_PID+=(0); }
+      done
+      ;;
+    cpus:*)
+      local X="${mode#cpus:}" all=() c i=0 chunk=()
+      [[ "$X" =~ ^[0-9]+$ && "$X" -ge 1 ]] || { alog "partition '$mode' inválida — usando off"; X=0; }
+      if (( X >= 1 )); then
+        read -ra all <<<"$(_cpus_expand "$(</sys/devices/system/cpu/online)")"
+        for c in "${all[@]}"; do
+          (( c < reserve )) && continue
+          chunk+=("$c")
+          if (( ${#chunk[@]} == X )); then SLOT_CPUS+=("$(IFS=,; echo "${chunk[*]}")"); SLOT_PID+=(0); chunk=(); fi
+        done
+        # resto (< X cpus) fica FORA dos slots (fatias uniformes p/ timing consistente)
+      fi
+      ;;
+  esac
+  if (( ${#SLOT_CPUS[@]} == 0 )); then SLOT_CPUS=(""); SLOT_PID=(0); fi   # off/fallback: 1 slot, sem pin
+  N_SLOTS=${#SLOT_CPUS[@]}
+  alog "slots: $N_SLOTS (partition=$mode reserve=$reserve)$( ((N_SLOTS>1)) && printf ' cpusets: %s' "${SLOT_CPUS[*]}" )"
+}
+
+# aplica a config pendente (chamar SÓ com todos os slots livres)
+apply_config() {
+  local cfg="$1"
+  CFG_PARTITION="$(jq -r '.partition // "off"' <<<"$cfg" 2>/dev/null)"
+  CFG_RESERVE="$(jq -r '.reserve // 0' <<<"$cfg" 2>/dev/null)"
+  CFG_DISABLED="$(jq -r '.disabled // false' <<<"$cfg" 2>/dev/null)"
+  AGENT_CFG_HASH="$(jq -r '.cfg_hash // ""' <<<"$cfg" 2>/dev/null)"
+  build_slots "$CFG_PARTITION" "$CFG_RESERVE"
+  [[ "$CFG_DISABLED" == true ]] && alog "config: juiz DESABILITADO pelo admin (drenado; segue batendo heartbeat)"
+  register
+}
+
 # ----------------------------------------------------------------- loop principal
+# _free_slot -> ecoa o índice do primeiro slot livre (rc 1 se nenhum)
+_free_slot() { local i; for i in "${!SLOT_PID[@]}"; do (( SLOT_PID[i] == 0 )) && { echo "$i"; return 0; }; done; return 1; }
+
 moj_agent_main() {
 # instância ÚNICA por host: um flock evita agentes DUPLICADOS (brigam por jobs e gastam forks).
 exec 8>"${AGENT_LOCK:-/tmp/moj-agent.$AGENT_HOST.lock}"
 flock -n 8 || { alog "já há um agente rodando em $AGENT_HOST (lock $AGENT_LOCK) — saindo"; exit 0; }
 # host desabilitado (ex.: nproc baixo demais p/ a jaula): não vira juiz. `touch ~/.moj-agent-disabled`
 [[ -f "${AGENT_DISABLED:-$HOME/.moj-agent-disabled}" ]] && { alog "agente DESABILITADO neste host (${AGENT_DISABLED:-$HOME/.moj-agent-disabled}) — saindo"; exit 0; }
-ulimit -u "$(ulimit -Hu)" 2>/dev/null || true   # folga de processos: calibração forka bwrap+time+timeout
+ulimit -u "$(ulimit -Hu)" 2>/dev/null || true   # folga de processos: N slots × (bwrap+time+timeout+compilador)
 alog "subindo: host=$AGENT_HOST cap=$CAPABILITY api=$MOJ_API cache=$JUDGE_CACHE hb=${HEARTBEAT_SECS}s ulimit-u=$(ulimit -u)"
 ensure_rootfs        # jaula no rootfs reprodutível (não no host)
+build_slots "$CFG_PARTITION" "$CFG_RESERVE"   # fallback local; a config do servidor vence (heartbeat)
 register
-report_cached_tls    # relançamento: reenvia os TLs já calibrados (sem recalibrar)
-BUSYPID=0   # pid do job/update rodando em background (0 = livre)
+# relançamento: reenvia os TLs já calibrados (sem recalibrar) — em BACKGROUND: com um cache
+# grande (centenas de problemas) isso leva minutos e segurava o loop (juiz cego p/ jobs/config)
+report_cached_tls &
+local free i n state resp cfg cmd upd jobs job
 while true; do
-  if (( BUSYPID != 0 )) && ! kill -0 "$BUSYPID" 2>/dev/null; then BUSYPID=0; fi
-  state=free; (( BUSYPID != 0 )) && state=busy
-  (( BUSYPID == 0 )) && gc_cache   # GC só com o juiz LIVRE (throttle interno de 6h)
+  # reap por slot + contagem de livres
+  free=0
+  for i in "${!SLOT_PID[@]}"; do
+    if (( SLOT_PID[i] != 0 )) && ! kill -0 "${SLOT_PID[i]}" 2>/dev/null; then SLOT_PID[i]=0; fi
+    (( SLOT_PID[i] == 0 )) && free=$((free+1))
+  done
+
+  # DRENADO (todos livres): aplica config pendente, executa comando exclusivo, roda o GC
+  if (( free == N_SLOTS )); then
+    if [[ -n "$PENDING_CMD" ]]; then run_command "$PENDING_CMD"; PENDING_CMD=""; fi
+    if [[ -n "$PENDING_CFG" ]]; then apply_config "$PENDING_CFG"; PENDING_CFG=""
+      free=$N_SLOTS   # slots recém-reconstruídos, todos livres
+    fi
+    [[ -z "$PENDING_CMD" && -z "$PENDING_CFG" ]] && gc_cache
+  fi
+
+  # enquanto drena (config/comando pendente) ou desabilitado: não reivindica (free_slots=0)
+  local claimable=$free
+  { [[ -n "$PENDING_CFG" || -n "$PENDING_CMD" || "$CFG_DISABLED" == true ]]; } && claimable=0
+  state=busy; (( claimable > 0 )) && state=free
 
   resp="$(_api /judge/heartbeat \
-    "$(jq -cn --arg h "$AGENT_HOST" --arg s "$state" --arg ih "$INVHASH" \
-       '{host:$h, state:$s, inv_hash:$ih}')")"
+    "$(jq -cn --arg h "$AGENT_HOST" --arg s "$state" --arg ih "$INVHASH" --arg ch "$AGENT_CFG_HASH" \
+       --argjson fs "$claimable" --argjson ts "$N_SLOTS" \
+       '{host:$h, state:$s, inv_hash:$ih, cfg_hash:$ch, free_slots:$fs, total_slots:$ts}')")"
   if [[ -n "$resp" ]]; then
     [[ "$(jq -r '.reregister // false' <<<"$resp" 2>/dev/null)" == true ]] && register
-    if (( BUSYPID == 0 )); then
+    # config nova do admin: agenda e DRENA (aplica quando todos os slots esvaziarem)
+    cfg="$(jq -c '.config // empty' <<<"$resp" 2>/dev/null)"
+    if [[ -n "$cfg" && "$cfg" != null ]]; then
+      PENDING_CFG="$cfg"
+      alog "config nova do servidor ($(jq -c 'del(.cfg_hash)' <<<"$cfg" 2>/dev/null)) — drenando slots p/ aplicar"
+    fi
+    if (( claimable > 0 )) && [[ -z "$PENDING_CFG" ]]; then
       cmd="$(jq -c '.command // empty' <<<"$resp" 2>/dev/null)"
       upd="$(jq -c '.update // empty' <<<"$resp" 2>/dev/null)"
-      job="$(jq -c '.assigned // empty' <<<"$resp" 2>/dev/null)"
       if [[ -n "$cmd" && "$cmd" != null ]]; then
-        run_command "$cmd" & BUSYPID=$!
-        alog "comando reivindicado $(jq -r '.action // .cmdid' <<<"$cmd" 2>/dev/null) -> pid $BUSYPID"
+        if [[ "$(jq -r '.action // ""' <<<"$cmd")" == clearcache ]]; then
+          PENDING_CMD="$cmd"; alog "clearcache agendado — drenando slots p/ executar"
+        else
+          i="$(_free_slot)" && { run_command "$cmd" "${SLOT_CPUS[i]}" & SLOT_PID[i]=$!
+            alog "comando reivindicado $(jq -r '.action // .cmdid' <<<"$cmd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
+        fi
       elif [[ -n "$upd" && "$upd" != null ]]; then
-        run_update "$upd" & BUSYPID=$!
-        alog "update reivindicado reqid=$(jq -r '.reqid' <<<"$upd" 2>/dev/null) -> pid $BUSYPID"
-      elif [[ -n "$job" && "$job" != null ]]; then
-        run_job "$job" & BUSYPID=$!
-        alog "job reivindicado id=$(jq -r '.id' <<<"$job" 2>/dev/null) -> pid $BUSYPID"
+        i="$(_free_slot)" && { run_update "$upd" "${SLOT_CPUS[i]}" & SLOT_PID[i]=$!
+          alog "update reivindicado reqid=$(jq -r '.reqid' <<<"$upd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
+      else
+        # LOTE: o servidor devolve assigned como array (até free_slots) ou escalar (legado)
+        jobs="$(jq -c '(.assigned // empty) | if type=="array" then .[] else . end' <<<"$resp" 2>/dev/null)"
+        while IFS= read -r job; do
+          [[ -n "$job" && "$job" != null ]] || continue
+          i="$(_free_slot)" || break
+          run_job "$job" "${SLOT_CPUS[i]}" & SLOT_PID[i]=$!
+          alog "job reivindicado id=$(jq -r '.id' <<<"$job" 2>/dev/null) -> slot $i${SLOT_CPUS[i]:+ [cpus ${SLOT_CPUS[i]}]} pid ${SLOT_PID[i]}"
+        done <<<"$jobs"
       fi
     fi
   fi

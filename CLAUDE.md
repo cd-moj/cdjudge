@@ -9,6 +9,16 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
 - `agent/moj-agent.sh` — o **agente** (modelo pull): conecta na API do MOJ, puxa jobs no
   **heartbeat**, baixa o pacote do problema sob demanda p/ um **cache local**
   (`JUDGE_CACHE`, default `~/.cache/moj/problems`), calibra na 1ª vez e **reporta o TL**.
+  - **MULTI-SLOT**: a máquina pode ser particionada (`off` = 1 slot; `numa` = 1 slot por
+    NUMA node; `cpus:<X>` = fatias de X cpus; `reserve` tira as N primeiras cpus) e corrigir
+    N problemas AO MESMO TEMPO — cada job/calibração roda num subshell PINADO ao cpuset do
+    slot (`taskset -pc` no próprio $BASHPID; herda p/ bwrap/compilador/solução; o `nproc` da
+    fatia auto-limita o paralelismo interno de testes). Heartbeat manda
+    `{free_slots,total_slots,cfg_hash}` e recebe `assigned` em LOTE (array) + `config` nova
+    quando o admin muda (`moj judges config <host>`); aplicar config/clearcache/GC exige
+    QUIESCÊNCIA (drena todos os slots primeiro). Fallback local: `AGENT_PARTITION`/
+    `AGENT_RESERVE` no agent.env (a config do servidor vence). 1 instância por host
+    (duas capabilities na mesma máquina teriam cpusets sobrepostos — não particione nesse caso).
   - **GC do cache**: cada uso carimba `$cdir/.last-used`; a cada `AGENT_CACHE_GC_HOURS` (6)
     com o juiz LIVRE, pacote sem uso há `AGENT_CACHE_MAX_DAYS` (14; 0=off) vira **STUB** —
     `pkg/` sai, `.moj-cache.json` + `tl.$host` ficam (o TL segue re-reportado no boot e é
