@@ -1,4 +1,4 @@
-# judge — agente + cluster do juiz
+# judge — agente pull do juiz
 
 Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README.md`** (tabela dos
 3 repos, layout, como subir). Workspace multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona
@@ -47,7 +47,7 @@ Detalhes: `cdmoj/server/judge-gw/PULL.md`.
 ## Deploy / operação (referência)
 
 - Homes de juiz: **C3SL** `/home/ppginf/bcribas/moj-judge`; **chococino** `/home/prof/ribas/moj-judge`.
-- Tokens de worker têm prefixo `mojw_`; tokens do Gitea ficam `600` — **nunca ecoar** nenhum dos dois.
+- Tokens de worker têm prefixo `mojw_` e ficam `600` — **nunca ecoar**.
 - `macalan` (sshd IPv6) limita conexões rápidas — espace os SSH.
 - `bash -n` antes de commitar. Rodapé de commit: **só** `Co-Authored-By:`, **nunca** `Claude-Session:`.
 - **Doc junto com o código** (doc atrasada = bug): mudou o protocolo pull/agente? atualize

@@ -1,0 +1,32 @@
+[Unit]
+# Agente de juiz MOJ (modelo PULL) — uma instância por CAPACIDADE: moj-agent@pos,
+# moj-agent@gpu, moj-agent@cm, moj-agent@hu. Só faz curl de SAÍDA p/ a API
+# (sem porta de entrada, sem nc). Instale como USER unit:
+#   ln -sf ~/judge/etc/systemd/moj-agent@.service ~/.config/systemd/user/
+#   systemctl --user enable --now moj-agent@pos
+Description=MOJ judge agent (pull) — capability %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Config por deploy: o agent.env (copiado de judge/etc/agent.env.sample) sobrescreve
+# os defaults abaixo. O '-' torna o arquivo opcional. %h = home do usuário.
+EnvironmentFile=-%h/judge/etc/agent.env
+Environment=MOJ_API=http://localhost/api/v1
+Environment=CAPABILITY=%i
+Environment=WORKER_TOKEN_FILE=%h/judge/etc/worker.token
+Environment=MOJTOOLS_DIR=%h/mojtools
+# modelo cache: baixa o pacote por problema p/ o cache local (sem clonar repo/NFS)
+Environment=JUDGE_CACHE=%h/judge/cache/problems
+# raiz da jaula: PADRÃO = $HOME/moj-sysroot (rootfs reprodutível já montado). CAGE_ROOT=host
+# força o host. Ver mojtools/SANDBOX.md.
+#Environment=CAGE_ROOT=%h/moj-sysroot
+Environment=HEARTBEAT_SECS=3
+WorkingDirectory=%h/judge/agent
+ExecStart=/bin/bash %h/judge/agent/moj-agent.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -57,8 +57,8 @@ agent_topology_json() {
 }
 
 # linguagens que ESTE host consegue julgar = lang-dirs cujo binário principal existe.
-# O escalonador usa isso p/ rotear cada submissão a um juiz com o toolchain dela (route
-# by language). Valores são alternativas (basta UMA existir). 'sh' é sempre suportado.
+# O servidor (escalonador in-daemon) usa isso p/ só entregar a um juiz um job cujo toolchain
+# ele tem (route by language). Valores são alternativas (basta UMA existir). 'sh' é sempre suportado.
 declare -A _LANGBIN=(
   [c]="gcc" [cpp]="g++" [java]="javac" [py]="pypy3 python3"
   [go]="gccgo go" [rs]="rustc" [hs]="ghc" [cs]="mcs mono-csc csc" [pas]="fpc"
@@ -84,7 +84,7 @@ agent_langs_json() {
 
 # objeto {id: checksum} dos problemas em CACHE local já calibrados. O id real e o
 # checksum (arquivos que afetam o TL) ficam no .moj-cache.json de cada pacote. Serve p/
-# o escalonador preferir juízes "quentes" e p/ detectar mudança de versão (recalibrar).
+# o servidor preferir juízes "quentes" e p/ detectar mudança de versão (recalibrar).
 agent_problems_json() {
   [[ -d "$JUDGE_CACHE" ]] || { echo '{}'; return; }
   { while IFS= read -r d; do

@@ -3,7 +3,7 @@
 # Só conexões de SAÍDA (curl). Não clona repositório: baixa o PACOTE de cada problema
 # (sob demanda) p/ um CACHE local, calibra na 1ª vez (e quando o problema muda) e
 # REPORTA o TL ao MOJ. Guarda o tl+checksum no cache p/ re-reportar ao ser relançado.
-# Assim a consistência de NFS vira só "aproveitar o cache" e levantar um juiz é trivial.
+# Assim levantar um juiz é trivial: ele baixa e cacheia sob demanda (sem NFS, sem clonar repo).
 #
 #   MOJ_API=https://moj.example/api/v1 CAPABILITY=pos bash moj-agent.sh
 set -u

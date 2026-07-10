@@ -1,19 +1,12 @@
 # Repositório do JUIZ (cd-moj). Versiona só CÓDIGO; dados e runtime ficam de fora.
 # Cada máquina de julgamento clona ESTE repo (não precisa do server/web do moj).
 
-# === dados de problemas: repos próprios / submódulos, montados via NFS (não replicar) ===
+# === dados de problemas: o agente baixa por problema p/ o cache local (não versionar) ===
 problems/
 problems.*/
 judge/problems/
 judge/problems.*/
-
-# === runtime do escalonador LEGADO (fila acumulada — não é código; pode crescer GBs) ===
-sistema_escalonador/master/
-sistema_escalonador/**/enviado/
-sistema_escalonador/**/enviado-*/
-sistema_escalonador/**/enfileirado/
-sistema_escalonador/**/lock/
-sistema_escalonador/**/logs/
+cache/
 
 # === segredos ===
 etc/worker.token
