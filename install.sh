@@ -12,7 +12,9 @@
 #     --cache DIR            JUDGE_CACHE (default $HOME/judge/cache/problems)
 #     --partition SPEC       off|numa|cpus:N (default: não fixa; a config do servidor vence)
 #     --reserve N            tira as N primeiras cpus dos slots
-#     --sysroot MODE         pull|tar|build|host (default pull)
+#     --sysroot MODE         pull|tar|build|keep|host (default pull)
+#                            keep = já provisionado em --sysroot-dir (ex.: construído por root,
+#                            ou por outro operador) — só confere e aponta o CAGE_ROOT p/ lá
 #     --sysroot-image REF    (pull) default ghcr.io/cd-moj/moj-sysroot:latest
 #     --sysroot-tar FILE     (tar)  tarball do rootfs (produzido por mojtools `make sysroot-tar`)
 #     --sysroot-dir DIR      raiz da jaula (default $HOME/moj-sysroot)
@@ -153,6 +155,11 @@ install_deps() {
 provision_sysroot() {
   case "$SYSROOT_MODE" in
     host) say "sysroot: modo HOST (CAGE_ROOT=host) — os compiladores têm de estar no host"; return 0;;
+    keep)
+      # A rootfs já foi provisionada por fora (ex.: construída por root com podman, porque o
+      # usuário do agente não tem userns p/ podman rootless). Só confere e usa.
+      [[ -d "$SYSROOT_DIR" ]] || die "sysroot keep: $SYSROOT_DIR não existe (construa antes)"
+      say "sysroot: mantendo o já provisionado em $SYSROOT_DIR";;
     build)
       have podman || die "sysroot build precisa de podman"
       local apl_arg=()
@@ -178,7 +185,7 @@ provision_sysroot() {
       mkdir -p "$SYSROOT_DIR"
       podman export "$cid" | tar -x -C "$SYSROOT_DIR"
       podman rm "$cid" >/dev/null 2>&1 || true;;
-    *) die "modo de sysroot inválido: $SYSROOT_MODE (use pull|tar|build|host)";;
+    *) die "modo de sysroot inválido: $SYSROOT_MODE (use pull|tar|build|keep|host)";;
   esac
   [[ -x "$SYSROOT_DIR/usr/bin/bash" || -x "$SYSROOT_DIR/bin/bash" ]] \
     && say "sysroot pronto em $SYSROOT_DIR" || warn "sysroot em $SYSROOT_DIR parece incompleto (sem bash)"

@@ -56,10 +56,16 @@ O **rootfs** é o **PADRÃO** (não opcional): os compiladores moram numa raiz r
 | `pull` (default) | `podman pull ghcr.io/cd-moj/moj-sysroot` + export | máquina com podman |
 | `tar` | extrai um tarball (`make sysroot-tar TAR=…`) | **C3SL / sem podman / sem root** |
 | `build` | `mojtools/make-sysroot.sh` (precisa podman) | montar do zero |
+| `keep` | usa o que já está em `--sysroot-dir` | a rootfs veio de fora (ex.: **root** a construiu) |
 | `host` | usa o host (`CAGE_ROOT=host`) | todos os compiladores já no host |
 
 **APL (Dyalog):** o `.deb` é proprietário e não vai em imagem pública — instale-o na rootfs com
 `--sysroot build --apl /caminho/dyalog.deb` (camada extra; o `postinst` cria `/usr/bin/dyalogscript`).
+
+**Se o userns só foi liberado p/ o `bwrap`** (perfil AppArmor, em vez do sysctl global), o `podman`
+**rootless** do usuário do agente também fica sem namespace ⇒ construa a rootfs **como root**
+(`sudo bash ../mojtools/make-sysroot.sh --out ~agente/moj-sysroot --apl …`, depois `chown -R`) e
+instale com **`--sysroot keep`**.
 
 > ⚠️ **Rode o `install.sh` UMA vez, com o conjunto COMPLETO de flags.** `make config` e
 > `make sysroot` **não** são incrementais: chamam o `install.sh` inteiro e **reescrevem o
