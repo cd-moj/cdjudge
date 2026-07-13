@@ -22,14 +22,30 @@ O `install.sh` detecta a distro, confere/instala as dependências, monta o **roo
 escreve o `etc/agent.env` + o token, e sobe o agente. Idempotente.
 
 ```bash
-git clone <cdjudge>   ~/judge
+git clone <cdjudge>   ~/judge        # TEM de ser $HOME/judge (o unit usa %h/judge)
 git clone <mojtools>  ~/mojtools
+sudo loginctl enable-linger "$USER"  # OBRIGATÓRIO — ver abaixo
 cd ~/judge
 make doctor                                   # só confere (deps + bwrap real + rootfs)
 make install CAP=pos MOJ_API=https://moj.naquadah.com.br/api/v1 \
      INSTALL_FLAGS="--token /caminho/worker.token"
 # capability: pos | gpu | cm | hu  (uma instância por capacidade)
 ```
+
+> **Linger é obrigatório** (com `--systemd user`, o default): sem ele o user manager morre no
+> logout — o agente cai junto **e**, pior, o limite **duro** de memória da jaula some (ele vem de
+> `systemd-run --user --scope -p MemoryMax`, que precisa do user manager; sem isso sobra só o "MLE
+> por RSS medido depois", que não contém um estouro rápido).
+>
+> **Rodar como root NÃO é alternativa:** como root o `cage-run.sh` usa cgroup **v1** (`cset`), que
+> não existe em distro moderna (cgroup v2 unificado) ⇒ **nenhum** limite de memória. O agente é p/
+> rodar como **usuário comum**.
+>
+> **Ubuntu ≥ 24.04:** o AppArmor bloqueia user-namespace de processo não-root
+> (`kernel.apparmor_restrict_unprivileged_userns=1`) e **sem userns não há `bwrap`**. Numa máquina
+> dedicada a julgar, libere:
+> `echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-moj-judge.conf && sudo sysctl --system`.
+> O `make doctor` acusa isso e imprime o remédio.
 
 O **rootfs** é o **PADRÃO** (não opcional): os compiladores moram numa raiz reprodutível
 (`$HOME/moj-sysroot`), então o host só precisa do runtime (`bwrap`, coreutils, …). Modos
@@ -41,6 +57,18 @@ O **rootfs** é o **PADRÃO** (não opcional): os compiladores moram numa raiz r
 | `tar` | extrai um tarball (`make sysroot-tar TAR=…`) | **C3SL / sem podman / sem root** |
 | `build` | `mojtools/make-sysroot.sh` (precisa podman) | montar do zero |
 | `host` | usa o host (`CAGE_ROOT=host`) | todos os compiladores já no host |
+
+**APL (Dyalog):** o `.deb` é proprietário e não vai em imagem pública — instale-o na rootfs com
+`--sysroot build --apl /caminho/dyalog.deb` (camada extra; o `postinst` cria `/usr/bin/dyalogscript`).
+
+> ⚠️ **Rode o `install.sh` UMA vez, com o conjunto COMPLETO de flags.** `make config` e
+> `make sysroot` **não** são incrementais: chamam o `install.sh` inteiro e **reescrevem o
+> `etc/agent.env` com os defaults** — `MOJ_API` volta p/ `http://localhost/api/v1` e as linhas
+> `AGENT_PARTITION`/`AGENT_RESERVE` somem. (O token sobrevive.) Se precisar mudar só uma chave,
+> edite o `etc/agent.env` à mão e `systemctl --user restart moj-agent@<cap>`.
+>
+> ⚠️ `--systemd system` **não funciona**: o unit é *user* (usa `%h`), e copiado p/
+> `/etc/systemd/system/` procuraria o config em `/root/judge/…`. Use `user` (default) ou `none`.
 
 ### Dependências (o doctor confere)
 

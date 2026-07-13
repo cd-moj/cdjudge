@@ -16,9 +16,13 @@
 #     --sysroot-image REF    (pull) default ghcr.io/cd-moj/moj-sysroot:latest
 #     --sysroot-tar FILE     (tar)  tarball do rootfs (produzido por mojtools `make sysroot-tar`)
 #     --sysroot-dir DIR      raiz da jaula (default $HOME/moj-sysroot)
+#     --apl FILE.deb         (build) instala o Dyalog APL (.deb proprietário) na rootfs
 #     --systemd MODE         user|system|none (default user; none ⇒ use run-agent.sh)
 #     --check                só roda o doctor e sai (não escreve nada)
 #     --yes                  não pergunta
+#
+# LINGER: com --systemd user, rode `sudo loginctl enable-linger $USER`. Sem linger o agente
+# morre no logout E o limite de memória da jaula degrada (o cgroup v2 vem do user manager).
 set -euo pipefail
 
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"   # .../judge
@@ -27,7 +31,7 @@ MOJ_API="http://localhost/api/v1"; CAPABILITY="pos"; TOKEN_SRC=""
 MOJTOOLS_DIR="$SELF/../mojtools"; JUDGE_CACHE="$HOME/judge/cache/problems"
 PARTITION=""; RESERVE=""
 SYSROOT_MODE="pull"; SYSROOT_IMAGE="ghcr.io/cd-moj/moj-sysroot:latest"
-SYSROOT_TAR=""; SYSROOT_DIR="$HOME/moj-sysroot"
+SYSROOT_TAR=""; SYSROOT_DIR="$HOME/moj-sysroot"; SYSROOT_APL=""
 SYSTEMD_MODE="user"; CHECK_ONLY=0; ASSUME_YES=0
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --sysroot-image) SYSROOT_IMAGE="$2"; shift 2;;
     --sysroot-tar) SYSROOT_TAR="$2"; shift 2;;
     --sysroot-dir) SYSROOT_DIR="$2"; shift 2;;
+    --apl) SYSROOT_APL="$2"; shift 2;;
     --systemd) SYSTEMD_MODE="$2"; shift 2;;
     --check) CHECK_ONLY=1; shift;;
     --yes) ASSUME_YES=1; shift;;
@@ -98,6 +103,16 @@ doctor() {
       say "bwrap: OK (namespace real)"
     else
       warn "bwrap presente mas NÃO cria namespace (fbwrap no-op? userns desabilitado?) — a jaula não isolará"
+      # Ubuntu >= 24.04: o AppArmor barra user-namespace de processo NÃO-root sem perfil próprio.
+      local uns; uns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
+      if [[ "$uns" == 1 && $EUID -ne 0 ]]; then
+        warn "  causa provável: kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu >= 24.04)"
+        warn "  remédio (numa máquina DEDICADA a julgar):"
+        warn "    echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-moj-judge.conf"
+        warn "    sudo sysctl --system"
+        warn "  NÃO resolva rodando o agente como root: sem cgroup v1/cset o limite DURO de memória"
+        warn "  simplesmente não existe (cage-run.sh só tem o caminho cgroup v2 p/ usuário comum)."
+      fi
     fi
   else
     warn "bwrap ausente"
@@ -106,6 +121,12 @@ doctor() {
   [[ -x /usr/bin/time ]] || warn "/usr/bin/time (GNU) ausente"
   # systemd-run --user (limite de memória cgroup v2 sem root)
   have systemd-run || warn "systemd-run ausente — limite de memória degrada (aviso na calibração)"
+  # linger: sem ele o user unit morre no logout E o user manager (dono do cgroup v2) some
+  if [[ "$SYSTEMD_MODE" == user ]] && have loginctl && [[ $EUID -ne 0 ]]; then
+    [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] \
+      || warn "linger DESLIGADO — rode:  sudo loginctl enable-linger $USER
+   (sem ele o agente cai no logout e o limite de memória da jaula degrada p/ 'MLE só por RSS')"
+  fi
   # rootfs não pode ser noexec
   if [[ "$SYSROOT_MODE" != host && -d "$SYSROOT_DIR" ]]; then
     local mnt; mnt="$(df --output=target "$SYSROOT_DIR" 2>/dev/null | tail -1)"
@@ -134,8 +155,13 @@ provision_sysroot() {
     host) say "sysroot: modo HOST (CAGE_ROOT=host) — os compiladores têm de estar no host"; return 0;;
     build)
       have podman || die "sysroot build precisa de podman"
+      local apl_arg=()
+      if [[ -n "$SYSROOT_APL" ]]; then
+        [[ -f "$SYSROOT_APL" ]] || die "--apl: arquivo inexistente: $SYSROOT_APL"
+        apl_arg=(--apl "$SYSROOT_APL"); say "sysroot: com APL (Dyalog) de $SYSROOT_APL"
+      fi
       say "sysroot: build via mojtools/make-sysroot.sh -> $SYSROOT_DIR"
-      bash "$MOJTOOLS_DIR/make-sysroot.sh" --out "$SYSROOT_DIR";;
+      bash "$MOJTOOLS_DIR/make-sysroot.sh" --out "$SYSROOT_DIR" "${apl_arg[@]}";;
     tar)
       [[ -f "$SYSROOT_TAR" ]] || die "sysroot tar: arquivo inexistente: $SYSROOT_TAR"
       say "sysroot: extrai $SYSROOT_TAR -> $SYSROOT_DIR"
