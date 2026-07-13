@@ -63,15 +63,35 @@ declare -A _LANGBIN=(
   [c]="gcc" [cpp]="g++" [java]="javac" [py]="pypy3 python3"
   [go]="gccgo go" [rs]="rustc" [hs]="ghc" [cs]="mcs mono-csc csc" [pas]="fpc"
   [pl]="swipl prolog pl" [js]="node nodejs" [ml]="ocamlopt ocaml" [spim]="spim"
-  [apl]="dyalog mapl apl" [riscv]="java" [sh]="bash" [kt]="kotlinc"
+  [apl]="dyalogscript dyalog mapl apl" [riscv]="java" [sh]="bash" [kt]="kotlinc"
 )
+
+# Existe e é executável DENTRO do rootfs? Não dá p/ usar `-x "$root/usr/bin/$b"` direto: o binário
+# da distro quase sempre é SYMLINK p/ caminho ABSOLUTO (/usr/bin/javac -> /etc/alternatives/javac
+# -> /usr/lib/jvm/…), que, visto do HOST, aponta p/ FORA do rootfs — o teste dá FALSO-NEGATIVO e a
+# linguagem some do inventário. Consequência real: o servidor faz route-by-language e simplesmente
+# NUNCA manda submissão de java/kt/pas/apl/riscv p/ este juiz (elas ficam eternamente na fila).
+# Aqui a cadeia de symlinks é resolvida DENTRO do rootfs.
+_rootfs_exec() {  # <root> <caminho absoluto dentro do rootfs>
+  local root="$1" p="$2" t n=0
+  while [[ -L "$root$p" ]]; do
+    (( ++n > 10 )) && return 1                      # laço de symlink
+    t="$(readlink "$root$p")"
+    case "$t" in /*) p="$t";; *) p="$(dirname "$p")/$t";; esac
+  done
+  [[ -x "$root$p" ]]
+}
+
 agent_langs_json() {
-  local l b ok first=1 out='[' root="${CAGE_ROOT:-}"
+  local l b d ok first=1 out='[' root="${CAGE_ROOT:-}"
   for l in "${!_LANGBIN[@]}"; do
     ok=0
     for b in ${_LANGBIN[$l]}; do
       if [[ -n "$root" ]]; then   # com CAGE_ROOT, o toolchain vem do ROOTFS (não do host)
-        [[ -x "$root/usr/local/bin/$b" || -x "$root/usr/bin/$b" || -x "$root/bin/$b" ]] && { ok=1; break; }
+        for d in /usr/local/bin /usr/bin /bin; do
+          _rootfs_exec "$root" "$d/$b" && { ok=1; break; }
+        done
+        (( ok )) && break
       else
         command -v "$b" >/dev/null 2>&1 && { ok=1; break; }
       fi
