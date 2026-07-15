@@ -195,7 +195,32 @@ provision_sysroot() {
 write_config() {
   mkdir -p "$SELF/etc" "$JUDGE_CACHE"
   local env="$SELF/etc/agent.env"
-  say "config: escreve $env"
+  # PRESERVA a config existente (raiz do wedge C5 do incidente 2026-07-15: `make config`/
+  # `make sysroot` regravavam o agent.env com DEFAULTS — MOJ_API voltava p/ localhost e
+  # AGENT_PARTITION/AGENT_RESERVE SUMIAM, divergindo da partição em uso). Regra: flag
+  # explícita vence; sem flag, vale o que JÁ está no agent.env; só então o default.
+  local _e_api="" _e_cap="" _e_cache="" _e_cage="" _e_part="" _e_res="" _e_hb="" _extra=""
+  if [[ -f "$env" ]]; then
+    eval "$(
+      . "$env" 2>/dev/null
+      printf '_e_api=%q; _e_cap=%q; _e_cache=%q; _e_cage=%q; _e_part=%q; _e_res=%q; _e_hb=%q\n' \
+        "${MOJ_API:-}" "${CAPABILITY:-}" "${JUDGE_CACHE:-}" "${CAGE_ROOT:-}" \
+        "${AGENT_PARTITION:-}" "${AGENT_RESERVE:-}" "${HEARTBEAT_SECS:-}"
+    )"
+    [[ "$MOJ_API" == "http://localhost/api/v1" && -n "$_e_api" ]] && MOJ_API="$_e_api"
+    [[ "$CAPABILITY" == "pos" && -n "$_e_cap" ]] && CAPABILITY="$_e_cap"
+    [[ "$JUDGE_CACHE" == "$HOME/judge/cache/problems" && -n "$_e_cache" ]] && JUDGE_CACHE="$_e_cache"
+    [[ -z "$PARTITION" && -n "$_e_part" ]] && PARTITION="$_e_part"
+    [[ -z "$RESERVE" && -n "$_e_res" ]] && RESERVE="$_e_res"
+    # linhas EXTRAS (MOJ_RESOLVE, AGENT_CACHE_*, AGENT_WORK, …) que o gerador não conhece: mantém
+    _extra="$(grep -vE '^[[:space:]]*(#|$|MOJ_API=|CAPABILITY=|WORKER_TOKEN_FILE=|MOJTOOLS_DIR=|JUDGE_CACHE=|CAGE_ROOT=|HEARTBEAT_SECS=|AGENT_PARTITION=|AGENT_RESERVE=)' "$env" 2>/dev/null)"
+  fi
+  local _cage_line
+  if [[ "$SYSROOT_MODE" == host ]]; then _cage_line="CAGE_ROOT=host"
+  elif [[ "$SYSROOT_MODE" == pull && "$SYSROOT_DIR" == "$HOME/moj-sysroot" && -n "$_e_cage" ]]; then
+    _cage_line="CAGE_ROOT=$_e_cage"      # modo default e já havia CAGE_ROOT: preserva
+  else _cage_line="CAGE_ROOT=$SYSROOT_DIR"; fi
+  say "config: escreve $env (preservando valores existentes sem flag)"
   {
     echo "# gerado por install.sh — ajuste à vontade."
     echo "MOJ_API=$MOJ_API"
@@ -203,10 +228,11 @@ write_config() {
     echo "WORKER_TOKEN_FILE=$SELF/etc/worker.token"
     echo "MOJTOOLS_DIR=$MOJTOOLS_DIR"
     echo "JUDGE_CACHE=$JUDGE_CACHE"
-    [[ "$SYSROOT_MODE" == host ]] && echo "CAGE_ROOT=host" || echo "CAGE_ROOT=$SYSROOT_DIR"
-    echo "HEARTBEAT_SECS=3"
+    echo "$_cage_line"
+    echo "HEARTBEAT_SECS=${_e_hb:-3}"
     [[ -n "$PARTITION" ]] && echo "AGENT_PARTITION=$PARTITION"
     [[ -n "$RESERVE"   ]] && echo "AGENT_RESERVE=$RESERVE"
+    [[ -n "$_extra" ]] && { echo "# ---- preservado do agent.env anterior ----"; printf '%s\n' "$_extra"; }
   } > "$env"
   chmod 600 "$env"
   # token

@@ -67,11 +67,13 @@ O **rootfs** é o **PADRÃO** (não opcional): os compiladores moram numa raiz r
 (`sudo bash ../mojtools/make-sysroot.sh --out ~agente/moj-sysroot --apl …`, depois `chown -R`) e
 instale com **`--sysroot keep`**.
 
-> ⚠️ **Rode o `install.sh` UMA vez, com o conjunto COMPLETO de flags.** `make config` e
-> `make sysroot` **não** são incrementais: chamam o `install.sh` inteiro e **reescrevem o
-> `etc/agent.env` com os defaults** — `MOJ_API` volta p/ `http://localhost/api/v1` e as linhas
-> `AGENT_PARTITION`/`AGENT_RESERVE` somem. (O token sobrevive.) Se precisar mudar só uma chave,
-> edite o `etc/agent.env` à mão e `systemctl --user restart moj-agent@<cap>`.
+> **`make config`/`make sysroot` agora PRESERVAM o `agent.env` existente**: flag explícita vence;
+> sem flag, vale o valor que JÁ está no arquivo (só então o default) — e linhas extras
+> (`MOJ_RESOLVE`, `AGENT_CACHE_*`, …) são mantidas. (Antes reescreviam com defaults — `MOJ_API`
+> voltava p/ localhost e `AGENT_PARTITION`/`AGENT_RESERVE` sumiam; foi a divergência de config
+> que wedgeou o restart no incidente 2026-07-15.) Além disso a config de partição **aplicada**
+> persiste em `<cache>/../agent-state.json` e é a fonte da verdade do boot — servidor > estado
+> persistido > agent.env.
 >
 > ⚠️ `--systemd system` **não funciona**: o unit é *user* (usa `%h`), e copiado p/
 > `/etc/systemd/system/` procuraria o config em `/root/judge/…`. Use `user` (default) ou `none`.
@@ -94,14 +96,35 @@ install -Dm600 <(printf '%s' "$TOK") "$RUNDIR/secrets/worker.token"
 # no juiz: --token <arquivo>  (ou instale à mão em ~/judge/etc/worker.token, 600)
 ```
 
-## Subir/reiniciar o agente
+## Subir/reiniciar o agente — SEM PERDER FILA
 
+Reiniciar é sempre seguro: os jobs em voo morrem **limpos** (a árvore inteira, sem órfãos) e o
+servidor os **re-enfileira NA HORA** quando o agente novo registra com `boot:true` — nenhuma
+submissão/calibração se perde (rede de segurança: `q_reconcile` 120s / `upd_reconcile` 1800s
+p/ host morto). A config de partição volta exatamente como estava (`agent-state.json` + a config
+do servidor adotada no boot) — restart nunca mais wedgeia por config divergente.
+
+- **`moj judges restart <host>`** (admin, sem SSH) — o agente mata os slots (SIGKILL no grupo de
+  processos de cada job, reportando judge-error/calib-fail ao servidor) e se re-executa.
+  `moj judges reset <host>` só mata os jobs presos e reconcilia a config, sem reiniciar o processo.
 - **systemd (user)** — o `install.sh` já faz `enable --now`. Manual:
   `systemctl --user restart moj-agent@pos` · `journalctl --user -u moj-agent@pos -f`.
-  O unit vive aqui: `etc/systemd/moj-agent@.service` (user unit, paths `%h`).
-- **`run-agent.sh`** — launcher de **instância única** sem systemd: encerra o agente antigo e
-  sobe um novo desacoplado (`setsid`, flock). `make restart` usa systemd se ativo, senão cai p/ ele.
+  O unit vive aqui: `etc/systemd/moj-agent@.service` (user unit, paths `%h`). O systemd mata o
+  cgroup INTEIRO — é o caminho recomendado onde houver linger.
+- **`run-agent.sh`** — launcher de **instância única** sem systemd: mata a **SESSÃO** antiga
+  (sid no `agent-<host>.pid` — pega build-and-test/bwrap/soluções, não só o agente) e sobe um
+  novo desacoplado (`setsid`, flock). `make restart` usa systemd se ativo, senão cai p/ ele.
 - **manual (teste):** `set -a; . etc/agent.env; set +a; bash agent/moj-agent.sh`.
+
+**Tetos de wall-clock (anti-wedge):** todo julgamento/calibração roda sob um `timeout` que mata o
+**grupo de processos** ao estourar um teto **DINÂMICO** — proporcional ao TL-por-teste × nº de
+testes (× soluções na calibração), ×2 p/ reruns de TLE, + compilação + folga (piso 300s). Um job
+preso em infra reporta `Judge Error`/falha de calibração e libera o slot sozinho — a fila nunca
+mais congela como no incidente 2026-07-15. Knobs: `AGENT_HARD_TL_FALLBACK` (default 1800s; usado
+só quando o pacote não dá p/ estimar) e `AGENT_LOCK_WAIT` (espera máx no flock por-problema,
+default 3600s). O scratch de cada job vive num **TMPDIR próprio** (`AGENT_WORK`, default
+`/tmp/moj-agent-work.<host>/s<slot>.<epoch>.<rand>`) removido no fim — slots nunca compartilham
+diretório de escrita.
 
 ## Deploy em várias máquinas
 

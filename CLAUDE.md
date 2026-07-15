@@ -13,12 +13,27 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
     NUMA node; `cpus:<X>` = fatias de X cpus; `reserve` tira as N primeiras cpus) e corrigir
     N problemas AO MESMO TEMPO — cada job/calibração roda num subshell PINADO ao cpuset do
     slot (`taskset -pc` no próprio $BASHPID; herda p/ bwrap/compilador/solução; o `nproc` da
-    fatia auto-limita o paralelismo interno de testes). Heartbeat manda
-    `{free_slots,total_slots,cfg_hash}` e recebe `assigned` em LOTE (array) + `config` nova
-    quando o admin muda (`moj judges config <host>`); aplicar config/clearcache/GC exige
-    QUIESCÊNCIA (drena todos os slots primeiro). Fallback local: `AGENT_PARTITION`/
-    `AGENT_RESERVE` no agent.env (a config do servidor vence). 1 instância por host
-    (duas capabilities na mesma máquina teriam cpusets sobrepostos — não particione nesse caso).
+    fatia auto-limita o paralelismo interno de testes). Com `set -m`, **cada slot é seu
+    próprio process group** (matável inteiro com `kill -- -pid`). Heartbeat manda
+    `{free_slots,total_slots,cfg_hash,status:ok|draining|disabled}` e recebe `assigned` em
+    LOTE (array) + `config` nova quando o admin muda (`moj judges config <host>`); aplicar
+    config/clearcache/GC exige QUIESCÊNCIA (drena todos os slots primeiro — e a drenagem
+    SEMPRE converge, ver tetos abaixo). Precedência de config no BOOT: **servidor (resposta
+    do register boot:true) > estado persistido (`<cache>/../agent-state.json`, gravado a cada
+    apply) > agent.env** — restart nunca diverge (C5 do incidente 2026-07-15). 1 instância
+    por host (duas capabilities na mesma máquina teriam cpusets sobrepostos — não particione
+    nesse caso). Modo ROOT força 1 slot (cset/cgroup do cage-run são globais).
+  - **ANTI-WEDGE (lições do incidente 2026-07-15)**: (1) **teto de wall-clock DINÂMICO** por
+    julgamento (`_job_cap`: TL×testes×2 + compile + folga) e por calibração (`_calib_cap`:
+    CALIBRATIONTL×testes×soluções×2 + folga), aplicado com `timeout` que mata o GRUPO —
+    job preso reporta Judge Error/calib-fail e libera o slot sozinho; (2) **calibra 1× por
+    máquina**: `ensure_cached` dedupa sob o flock por-problema INCLUSIVE full (pula se uma
+    full do MESMO checksum completou enquanto esperava o lock) — todos os slots usam o MESMO
+    `tl.<host>`; (3) **comandos urgentes** `kill`/`restart` chegam MESMO ocupado (`moj judges
+    reset/restart`, recuperação sem SSH); (4) **TMPDIR por job** (`AGENT_WORK/s<slot>.<epoch>`,
+    removido no reap) — slots nunca compartilham escrita; (5) restart re-enfileira o trabalho
+    em voo no servidor (register `boot:true`) — fila nunca se perde; (6) forks de slot fecham
+    o fd do lock de instância (`8>&-`) — órfão não trava o agente novo.
   - **GC do cache**: cada uso carimba `$cdir/.last-used`; a cada `AGENT_CACHE_GC_HOURS` (6)
     com o juiz LIVRE, pacote sem uso há `AGENT_CACHE_MAX_DAYS` (14; 0=off) vira **STUB** —
     `pkg/` sai, `.moj-cache.json` + `tl.$host` ficam (o TL segue re-reportado no boot e é
