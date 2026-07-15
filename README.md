@@ -62,6 +62,11 @@ O **rootfs** é o **PADRÃO** (não opcional): os compiladores moram numa raiz r
 **APL (Dyalog):** o `.deb` é proprietário e não vai em imagem pública — instale-o na rootfs com
 `--sysroot build --apl /caminho/dyalog.deb` (camada extra; o `postinst` cria `/usr/bin/dyalogscript`).
 
+**Camadas extras da rootfs** (toolchains grandes/locais que não vão na imagem — planners PDDL/SAT,
+solvers do curso de compiladores, …): o lugar PADRÃO na máquina de juiz é **`~/rootfs-extras/`**
+(ex.: `/home/moj/rootfs-extras/planners`). Provisionado por rsync (não é git, não entra na imagem);
+o `lang/<lang>/prep.sh` binda o que precisar na jaula (`-b <dir>`, o mesmo padrão do `/opt/kotlin`).
+
 **Se o userns só foi liberado p/ o `bwrap`** (perfil AppArmor, em vez do sysctl global), o `podman`
 **rootless** do usuário do agente também fica sem namespace ⇒ construa a rootfs **como root**
 (`sudo bash ../mojtools/make-sysroot.sh --out ~agente/moj-sysroot --apl …`, depois `chown -R`) e
