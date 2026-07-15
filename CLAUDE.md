@@ -27,9 +27,12 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
     julgamento (`_job_cap`: TL×testes×2 + compile + folga) e por calibração (`_calib_cap`:
     CALIBRATIONTL×testes×soluções×2 + folga), aplicado com `timeout` que mata o GRUPO —
     job preso reporta Judge Error/calib-fail e libera o slot sozinho; (2) **calibra 1× por
-    máquina**: `ensure_cached` dedupa sob o flock por-problema INCLUSIVE full (pula se uma
-    full do MESMO checksum completou enquanto esperava o lock) — todos os slots usam o MESMO
-    `tl.<host>`; (3) **comandos urgentes** `kill`/`restart` chegam MESMO ocupado (`moj judges
+    máquina**: `ensure_cached` dedupa sob o flock por-problema INCLUSIVE full — pula se uma
+    full do MESMO checksum completou enquanto esperava o lock OU se o PEDIDO (`req_epoch` =
+    requested_at/at, 4º arg) é mais velho que ela; checksum novo sempre recalibra — todos os
+    slots usam o MESMO `tl.<host>` (e o servidor nem entrega calibração de target já em
+    execução em outro lugar: serialização no `upd_claim`); (3) **comandos urgentes**
+    `kill`/`restart` chegam MESMO ocupado (`moj judges
     reset/restart`, recuperação sem SSH); (4) **TMPDIR por job** (`AGENT_WORK/s<slot>.<epoch>`,
     removido no reap) — slots nunca compartilham escrita; (5) restart re-enfileira o trabalho
     em voo no servidor (register `boot:true`) — fila nunca se perde; (6) forks de slot fecham

@@ -193,11 +193,15 @@ _calib_cap() {
   printf '%s' "$cap"
 }
 
-# ensure_cached <id> [force_report] [full] : garante o pacote no cache p/ a versão ATUAL e que
-# o TL esteja calibrado+reportado. Baixa+calibra na 1ª vez ou se o checksum mudou. full=1 força
-# recalibração rodando TODAS as soluções (Calibrar explícito). Ecoa o diretório do pacote.
+# ensure_cached <id> [force_report] [full] [req_epoch] : garante o pacote no cache p/ a versão
+# ATUAL e que o TL esteja calibrado+reportado. Baixa+calibra na 1ª vez ou se o checksum mudou.
+# full=1 força recalibração rodando TODAS as soluções (Calibrar explícito). req_epoch = quando o
+# PEDIDO foi feito (requested_at do update / at do comando): full de um pedido MAIS VELHO que a
+# última calibração full do MESMO checksum é duplicata satisfeita — skip (checksum novo SEMPRE
+# recalibra). Ecoa o diretório do pacote.
 ensure_cached() {
-  local id="$1" force="${2:-0}" full="${3:-0}" cdir meta mj sc local_cks
+  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" cdir meta mj sc local_cks
+  [[ "$req_epoch" =~ ^[0-9]+$ ]] || req_epoch=0
   cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
   mkdir -p "$cdir" 2>/dev/null
   mj="$(_api_get "/judge/package-meta?id=$(_uri "$id")")"
@@ -225,15 +229,18 @@ ensure_cached() {
     local lc; lc="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
     if [[ "$full" != 1 && -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then exit 0; fi  # outro já fez
     # INVARIANTE "calibra 1× por máquina": mesmo o full (Calibrar explícito) PULA se uma
-    # calibração full DESTE MESMO checksum completou enquanto esperávamos o lock — N pedidos
-    # duplicados concorrentes colapsam em 1 execução (todos os slots usam o MESMO tl.<host>).
-    # Um "Calibrar" deliberado POSTERIOR (calibrated_at < wait_start) recalibra normalmente.
+    # calibração full DESTE MESMO checksum já satisfaz o pedido — seja porque completou
+    # enquanto esperávamos o lock (calibrated_at >= wait_start: N pedidos concorrentes
+    # colapsam em 1), seja porque o PEDIDO é mais velho que ela (calibrated_at >= req_epoch:
+    # duplicata requentada da fila morre num skip). Checksum NOVO nunca cai aqui (lc != sc
+    # ⇒ recalibra); um "Calibrar" deliberado POSTERIOR (pedido novo) recalibra normalmente.
     if [[ "$full" == 1 && -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then
       local _ca _fl
       _ca="$(jq -r '.calibrated_at // 0' "$meta" 2>/dev/null)"
       _fl="$(jq -r '.full // false' "$meta" 2>/dev/null)"
-      if [[ "$_fl" == true && "$_ca" =~ ^[0-9]+$ ]] && (( _ca >= wait_start )); then
-        alog "calibração full de $id: outro slot JÁ fez este checksum — pulando duplicata"
+      if [[ "$_fl" == true && "$_ca" =~ ^[0-9]+$ ]] \
+         && { (( _ca >= wait_start )) || { (( req_epoch > 0 )) && (( _ca >= req_epoch )); }; }; then
+        alog "calibração full de $id: checksum já calibrado (pedido satisfeito) — pulando duplicata"
         exit 0
       fi
     fi
@@ -526,9 +533,11 @@ run_update() {  # $1 = request JSON  $2 = cpuset do slot ("" = sem pin)  (bg; PO
   target="$(jq -r '.target // ""' <<<"$upd")"
   logf="$(mktemp)"; rc=0
   case "$kind" in
-    calibrate)   # Calibrar explícito: roda TODAS as soluções (full=1) e reporta TL + log
+    calibrate)   # Calibrar explícito: roda TODAS as soluções (full=1) e reporta TL + log.
+      # requested_at do pedido: duplicata mais velha que a última full do mesmo checksum = skip
       if [[ -n "$target" ]]; then
-        ensure_cached "$target" 1 1 >/dev/null 2>"$logf"; rc=$?
+        local _req; _req="$(jq -r '.requested_at // 0' <<<"$upd" 2>/dev/null)"
+        ensure_cached "$target" 1 1 "$_req" >/dev/null 2>"$logf"; rc=$?
         # anexa o LOG da calibração (calibreitor) ao report -> visível no MOJ sem ssh.
         local _cd; _cd="$(cache_id_dir "$target")"
         if [[ -f "$_cd/.calib.log" ]]; then
@@ -579,10 +588,11 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}  $2 = cpuset do slot (
       register   # inventário agora vazio -> o MOJ vê o cache limpo
       ;;
     calibrate)   # calibração DIRECIONADA a este host (full): baixa/recalibra e reporta
-      local target; target="$(jq -r '.id // empty' <<<"$c" 2>/dev/null)"
+      local target creq; target="$(jq -r '.id // empty' <<<"$c" 2>/dev/null)"
+      creq="$(jq -r '.at // 0' <<<"$c" 2>/dev/null)"
       if [[ -n "$target" ]]; then
         alog "comando: calibrar $target (full) neste host${cpuset:+ [cpus $cpuset]}"
-        ensure_cached "$target" 1 1 >/dev/null 2>&1 && alog "calibrado $target" || alog "calibrate $target falhou"
+        ensure_cached "$target" 1 1 "$creq" >/dev/null 2>&1 && alog "calibrado $target" || alog "calibrate $target falhou"
       else alog "comando calibrate sem id"; fi
       ;;
     *) alog "comando desconhecido: ${action:-<vazio>}" ;;
