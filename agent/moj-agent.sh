@@ -746,7 +746,7 @@ _free_slot() { local i; for i in "${!SLOT_PID[@]}"; do (( SLOT_PID[i] == 0 )) &&
 moj_agent_main() {
 # instância ÚNICA por host: um flock evita agentes DUPLICADOS (brigam por jobs e gastam forks).
 exec 8>"${AGENT_LOCK:-/tmp/moj-agent.$AGENT_HOST.lock}"
-flock -n 8 || { alog "já há um agente rodando em $AGENT_HOST (lock $AGENT_LOCK) — saindo"; exit 0; }
+flock -n 8 || { alog "já há um agente rodando em $AGENT_HOST (lock ${AGENT_LOCK:-/tmp/moj-agent.$AGENT_HOST.lock}) — saindo"; exit 0; }   # ${:-}: sob set -u, $AGENT_LOCK cru CRASHAVA a instância duplicada em vez de sair limpo
 # host desabilitado (ex.: nproc baixo demais p/ a jaula): não vira juiz. `touch ~/.moj-agent-disabled`
 [[ -f "${AGENT_DISABLED:-$HOME/.moj-agent-disabled}" ]] && { alog "agente DESABILITADO neste host (${AGENT_DISABLED:-$HOME/.moj-agent-disabled}) — saindo"; exit 0; }
 ulimit -u "$(ulimit -Hu)" 2>/dev/null || true   # folga de processos: N slots × (bwrap+time+timeout+compilador)
