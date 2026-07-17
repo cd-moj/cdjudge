@@ -415,10 +415,15 @@ register() {  # [boot=1] — boot:true faz o servidor RE-ENFILEIRAR o que estava
                cage_root:(if $cage=="" then null else $cage end),
                cache_bytes:$cb, inv_hash:$ih,
                total_slots:$ts, partition:$part, topology:$topo, boot:$boot}')"
-  if REG_RESP="$(_api /judge/register "$body")"; then
+  # VALIDAR O CORPO, não só o transporte: um proxy/landing errado responde 200 com HTML e o
+  # agente "se registrava" de mentira — sem register real não há requeue boot:true e o claim
+  # do agente anterior vira FANTASMA imortal (o keepalive do heartbeat renova o mtime p/
+  # sempre). Caso real: cut-over 2026-07-17, fso-butters-modulo preso em "calibrando".
+  if REG_RESP="$(_api /judge/register "$body")" \
+     && jq -e '.success == true' <<<"$REG_RESP" >/dev/null 2>&1; then
     alog "registrado ($(jq -r 'length' <<<"$problems") problemas, $(jq -r 'length' <<<"$langs") linguagens, inv=$INVHASH)"
   else
-    REG_RESP=""; alog "falha ao registrar"
+    REG_RESP=""; alog "falha ao registrar (sem resposta válida do servidor)"; return 1
   fi
 }
 
@@ -764,7 +769,10 @@ rm -rf "$AGENT_WORK" 2>/dev/null; mkdir -p "$AGENT_WORK" 2>/dev/null
 # boot:true); 2) estado PERSISTIDO da última aplicada (agent-state.json); 3) agent.env.
 _load_state || true
 build_slots "$CFG_PARTITION" "$CFG_RESERVE"
-register 1   # boot:true => servidor re-enfileira o que estava atribuído a este host + manda config
+# boot:true => servidor re-enfileira o que estava atribuído a este host + manda config.
+# INSISTIR até registrar DE VERDADE (resposta validada): operar sem register real deixa os
+# claims do agente anterior fantasmas (sem requeue) — e o heartbeat os manteria vivos p/ sempre.
+until register 1; do alog "register de boot falhou — nova tentativa em 30s"; sleep 30; done
 local bootcfg bch
 bootcfg="$(jq -c '.config // empty' <<<"${REG_RESP:-}" 2>/dev/null)"
 if [[ -n "$bootcfg" && "$bootcfg" != null ]]; then
