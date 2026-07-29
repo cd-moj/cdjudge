@@ -396,6 +396,9 @@ register() {  # [boot=1] — boot:true faz o servidor RE-ENFILEIRAR o que estava
   # (adotada antes do 1º heartbeat). REG_RESP guarda a resposta p/ o boot ler.
   local boot="${1:-0}" specs problems langs body
   specs="$(agent_specs_json)"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
+  # versões do toolchain medidas DENTRO da jaula (cacheadas; ver inventory.sh) — o servidor
+  # publica isso na "info sheet" da prova
+  local toolchain; toolchain="$(agent_toolchain_json "$langs")"; [[ -n "$toolchain" ]] || toolchain='{}'
   INVHASH="$(agent_inv_hash "$problems")"
   local cbytes; cbytes="$(du -sb "$JUDGE_CACHE" 2>/dev/null | cut -f1)"; [[ "$cbytes" =~ ^[0-9]+$ ]] || cbytes=0
   # capability 'gpu' exige GPU de COMPUTE comprovada (nvidia-smi/rocm-smi respondendo);
@@ -408,10 +411,11 @@ register() {  # [boot=1] — boot:true faz o servidor RE-ENFILEIRAR o que estava
   local bootj=false; [[ "$boot" == 1 ]] && bootj=true
   body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$cap" \
     --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" \
+    --argjson toolchain "$toolchain" \
     --arg cage "${CAGE_ROOT:-}" --argjson cb "$cbytes" --arg ih "$INVHASH" \
     --argjson ts "${N_SLOTS:-1}" --arg part "${CFG_PARTITION:-off}" \
     --argjson topo "$(agent_topology_json)" --argjson boot "$bootj" \
-    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs,
+    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs, toolchain:$toolchain,
                cage_root:(if $cage=="" then null else $cage end),
                cache_bytes:$cb, inv_hash:$ih,
                total_slots:$ts, partition:$part, topology:$topo, boot:$boot}')"

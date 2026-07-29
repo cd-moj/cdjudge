@@ -102,6 +102,49 @@ agent_langs_json() {
   out+=']'; printf '%s' "$out" | jq -c 'sort'
 }
 
+# VERSÃO do compilador/interpretador de cada linguagem, MEDIDA DENTRO DA JAULA — com
+# CAGE_ROOT o que vale é o rootfs, não o host. É o dado que a "info sheet" da prova publica
+# (cdmoj: aba 📄 Documentos), então tem de ser o que o aluno enfrenta de verdade.
+# Mesmo mapa de comandos do `collect_toolchain` do mojtools/build-and-test.sh.
+declare -A _VERCMD=(
+  [c]="gcc --version" [cpp]="g++ --version" [java]="javac -version" [py]="python3 --version"
+  [go]="gccgo --version" [rs]="rustc --version" [hs]="ghc --version" [cs]="mcs --version"
+  [pas]="fpc -iV" [pl]="swipl --version" [js]="node --version" [ml]="ocamlopt -version"
+  [spim]="spim -version" [sh]="bash --version" [kt]="kotlinc -version"
+)
+
+# agent_toolchain_json <langs-json> -> {"c":"gcc (Ubuntu …) 13.3.0", "java":"javac 21.0.8", …}
+# Custa UMA jaula por linguagem, então o resultado é CACHEADO em disco e só refeito quando a
+# raiz da jaula, a lista de linguagens ou o mojtools mudam. Falha numa linguagem é ignorada
+# (a linguagem some do mapa) — inventário nunca pode derrubar o registro do juiz.
+agent_toolchain_json() {
+  local langs="${1:-[]}" root="${CAGE_ROOT:-}" cache="${JUDGE_CACHE%/problems}/toolchain.json"
+  local cr="$MOJTOOLS_DIR/cage-run.sh" key stamp
+  [[ -f "$cr" ]] || { echo '{}'; return; }
+  stamp="$(stat -c %Y "$cr" 2>/dev/null)$(stat -c %Y "${root:-/}/usr/bin" 2>/dev/null)"
+  key="$(printf '%s|%s|%s' "$root" "$langs" "$stamp" | sha256sum | cut -c1-16)"
+  if [[ -s "$cache" ]] && [[ "$(jq -r '.key // ""' "$cache" 2>/dev/null)" == "$key" ]]; then
+    jq -c '.toolchain // {}' "$cache" 2>/dev/null && return
+  fi
+  local w out='{}' l vc ver
+  w="$(mktemp -d)" || { echo '{}'; return; }
+  while IFS= read -r l; do
+    vc="${_VERCMD[$l]:-}"; [[ -n "$vc" ]] || continue
+    printf '#!/bin/bash\n%s 2>&1 | head -2\n' "$vc" > "$w/.ver.sh"; chmod +x "$w/.ver.sh"
+    ver="$(bash "$cr" ${root:+-R "$root"} -w "$w" -r "$w/.ver.sh" \
+             -s "$w/.s" -t "$w/.t" -T 20 -B "$w/.b" 2>/dev/null \
+           | grep -m1 -v '^[[:space:]]*$')"
+    ver="${ver//$'\t'/ }"; ver="${ver:0:200}"
+    [[ -n "$ver" ]] || continue
+    out="$(jq -c --arg k "$l" --arg v "$ver" '.[$k]=$v' <<<"$out" 2>/dev/null)" || out='{}'
+  done < <(jq -r '.[]?' <<<"$langs" 2>/dev/null)
+  rm -rf "$w"
+  mkdir -p "$(dirname "$cache")" 2>/dev/null
+  jq -cn --arg k "$key" --argjson t "$out" '{key:$k, toolchain:$t}' > "$cache.tmp" 2>/dev/null \
+    && mv -f "$cache.tmp" "$cache"
+  printf '%s' "$out"
+}
+
 # objeto {id: checksum} dos problemas em CACHE local já calibrados. O id real e o
 # checksum (arquivos que afetam o TL) ficam no .moj-cache.json de cada pacote. Serve p/
 # o servidor preferir juízes "quentes" e p/ detectar mudança de versão (recalibrar).
