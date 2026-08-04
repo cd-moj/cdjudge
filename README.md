@@ -116,9 +116,13 @@ do servidor adotada no boot) — restart nunca mais wedgeia por config divergent
   `systemctl --user restart moj-agent@pos` · `journalctl --user -u moj-agent@pos -f`.
   O unit vive aqui: `etc/systemd/moj-agent@.service` (user unit, paths `%h`). O systemd mata o
   cgroup INTEIRO — é o caminho recomendado onde houver linger.
-- **`run-agent.sh`** — launcher de **instância única** sem systemd: mata a **SESSÃO** antiga
-  (sid no `agent-<host>.pid` — pega build-and-test/bwrap/soluções, não só o agente) e sobe um
-  novo desacoplado (`setsid`, flock). `make restart` usa systemd se ativo, senão cai p/ ele.
+- **`run-agent.sh`** — com a unit instalada/enabled ele **delega ao systemd**
+  (`systemctl --user restart moj-agent@<cap>`), matando antes qualquer instância manual antiga:
+  subir via `setsid` por fora do supervisor não volta no reboot nem reinicia em crash (o drift
+  de 2026-08-04 — o "run-agent.sh depois do pull" virou o caminho de fato e a unit ficou
+  inactive). Sem unit (dev/C3SL), continua o launcher de **instância única**: mata a **SESSÃO**
+  antiga (sid no `agent-<host>.pid` — pega build-and-test/bwrap/soluções, não só o agente) e
+  sobe um novo desacoplado (`setsid`, flock). `RUN_AGENT_FORCE_MANUAL=1` força o manual.
 - **manual (teste):** `set -a; . etc/agent.env; set +a; bash agent/moj-agent.sh`.
 
 **Tetos de wall-clock (anti-wedge):** todo julgamento/calibração roda sob um `timeout` que mata o

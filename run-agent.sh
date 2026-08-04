@@ -23,6 +23,21 @@ _kill_session() {
   for n in 1 2 3 4 5; do pgrep -s "$sid" >/dev/null 2>&1 || return 0; sleep 1; done
   pkill -KILL -s "$sid" 2>/dev/null; sleep 1
 }
+# SYSTEMD MANDA: se a unit do agente está instalada/enabled p/ este usuário, o restart é DELA.
+# Subir via setsid por fora cria um agente FORA do supervisor — não volta no reboot, não
+# reinicia em crash, e a unit fica inactive achando que não há agente (o drift descoberto em
+# 2026-08-04, quando o run-agent.sh pós-pull virou o caminho de fato). O caminho manual abaixo
+# continua como fallback p/ máquina sem a unit (dev/instalação nova); RUN_AGENT_FORCE_MANUAL=1
+# força o manual mesmo com unit (debug).
+if [[ -z "${RUN_AGENT_FORCE_MANUAL:-}" ]]; then
+  _xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if env XDG_RUNTIME_DIR="$_xdg" systemctl --user is-enabled "moj-agent@${CAPABILITY:-pos}" >/dev/null 2>&1; then
+    [[ -f "$PIDFILE" ]] && { _kill_session "$(cat "$PIDFILE" 2>/dev/null)"; rm -f "$PIDFILE"; }
+    echo "unit moj-agent@${CAPABILITY:-pos} instalada — entregando ao systemd (restart)"
+    exec env XDG_RUNTIME_DIR="$_xdg" systemctl --user restart "moj-agent@${CAPABILITY:-pos}"
+  fi
+fi
+
 [[ -f "$PIDFILE" ]] && _kill_session "$(cat "$PIDFILE" 2>/dev/null)"
 # fallback legado (1º restart pós-upgrade, sem pidfile): mata por cmdline como antes — cobre o
 # main e os subshells; netos remanescentes morrem quando o servidor re-enfileira e o TL dinâmico
