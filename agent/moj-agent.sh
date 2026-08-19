@@ -136,8 +136,9 @@ report_tl() {
 }
 
 # report_calib_log <id> <checksum> <logfile> [pkgdir] : envia ao MOJ o LOG de calibração
-# (limitado) + o report.html POR SOLUÇÃO (pkg/.calib-reports/*), p/ o autor ver no editor, por
-# juiz, como cada solução se comportou. Falha não atrapalha o julgamento.
+# (limitado) + o report.html POR SOLUÇÃO (pkg/.calib-reports/*) + o vetor ESTRUTURADO `sols`
+# (pkg/.calib-sols.json do calibreitor: por solução, {file,lang,category,verdict,tests}), p/ o
+# autor ver no editor e processar com ferramentas externas. Falha não atrapalha o julgamento.
 report_calib_log() {
   local id="$1" cks="$2" lf="$3" pkg="${4:-}" log="" reports='[]'
   [[ -f "$lf" ]] && log="$(tail -c 60000 "$lf" 2>/dev/null)"
@@ -150,10 +151,29 @@ report_calib_log() {
       reports="$(jq -c --arg n "$(basename "$rf" .html)" --rawfile h "$rf" '. + [{name:$n, html_b64:($h|@base64)}]' <<<"$reports" 2>/dev/null)" || reports='[]'
     done
   fi
-  # monta o corpo num ARQUIVO: os reports (grandes) entram por stdin no jq, nunca por argv.
+  # sols: a cópia no dir do CACHE ($cdir, ao lado do .calib.log) sobrevive ao GC do pkg e
+  # alimenta o re-envio de boot. pkg presente SEM o arquivo = calibração sem sols (abortada/
+  # mojtools velho): remove a cópia — nunca re-enviar dado velho com cara de novo.
+  local cdir solsf=""; cdir="$(dirname "$lf")"
+  if [[ -n "$pkg" ]]; then
+    if [[ -s "$pkg/.calib-sols.json" ]]; then cp -f "$pkg/.calib-sols.json" "$cdir/.calib-sols.json" 2>/dev/null
+    else rm -f "$cdir/.calib-sols.json" 2>/dev/null; fi
+  fi
+  if [[ -s "$cdir/.calib-sols.json" ]] \
+     && (( $(stat -c%s "$cdir/.calib-sols.json" 2>/dev/null || echo 0) <= 300000 )) \
+     && jq -e 'type=="array"' "$cdir/.calib-sols.json" >/dev/null 2>&1; then
+    solsf="$cdir/.calib-sols.json"
+  fi
+  # monta o corpo num ARQUIVO: reports (stdin) e sols (--slurpfile) — grandes NUNCA por argv.
   local bf; bf="$(mktemp)"
-  printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
-        '{host:$h, id:$id, checksum:$c, log:$log, reports:.}' > "$bf" 2>/dev/null
+  if [[ -n "$solsf" ]]; then
+    printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
+          --slurpfile s "$solsf" \
+          '{host:$h, id:$id, checksum:$c, log:$log, reports:., sols:($s[0] // [])}' > "$bf" 2>/dev/null
+  else
+    printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
+          '{host:$h, id:$id, checksum:$c, log:$log, reports:.}' > "$bf" 2>/dev/null
+  fi
   [[ -s "$bf" ]] && _api_file /judge/calib-report "$bf"
   rm -f "$bf"
 }
@@ -165,8 +185,11 @@ _job_cap() {
   local pkg="$1" lang="$2" n tl compl cap
   n="$(find "$pkg/tests/input" -maxdepth 1 -type f 2>/dev/null | wc -l)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || { printf '%s' "$AGENT_HARD_TL_FALLBACK"; return; }
-  tl="$( ( declare -A TL TLMOD; source "$pkg/tl.$AGENT_HOST" 2>/dev/null
-           printf '%s' "${TL[$lang]:-${TL[default]:-5}}" ) )"
+  # TLOVERRIDE do conf (o autor manda no TL) tem de entrar no TETO: com override de 10s e
+  # calibrado de 0.03s, um cap calculado do calibrado mataria o job legítimo no wall-clock.
+  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE; source "$pkg/tl.$AGENT_HOST" 2>/dev/null
+           source "$pkg/conf" 2>/dev/null
+           printf '%s' "${TLOVERRIDE[$lang]:-${TLOVERRIDE[default]:-${TL[$lang]:-${TL[default]:-5}}}}" ) )"
   [[ "$tl" =~ ^[0-9]+([.][0-9]+)?$ ]] || tl=5
   compl="$(cat "$pkg/scripts/$lang/compile-tl" "$MOJTOOLS_DIR/lang/$lang/compile-tl" 2>/dev/null | head -n1)"
   [[ "$compl" =~ ^[0-9]+$ ]] || compl=30
@@ -184,7 +207,7 @@ _calib_cap() {
   else s="$(find "$pkg/sols/good" -maxdepth 1 -type f 2>/dev/null | wc -l)"; fi
   [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$s" =~ ^[0-9]+$ && "$s" -ge 1 ]] \
     || { printf '%s' "$AGENT_HARD_TL_FALLBACK"; return; }
-  caltl="$( ( declare -A ULIMITS TLMOD; CALIBRATIONTL=""; source "$pkg/conf" 2>/dev/null
+  caltl="$( ( declare -A ULIMITS TLMOD TLOVERRIDE; CALIBRATIONTL=""; source "$pkg/conf" 2>/dev/null
               printf '%s' "${CALIBRATIONTL:-5}" ) )"
   [[ "$caltl" =~ ^[0-9]+([.][0-9]+)?$ ]] || caltl=5
   cap="$(echo "($caltl + 2.2) * $n * $s * 2 + $s * 30 + 120" | bc -l 2>/dev/null)"; cap="${cap%%.*}"
@@ -318,7 +341,8 @@ report_cached_tls() {
     elif [[ -f "$d/tl.$AGENT_HOST" ]]; then tldir="$d"        # stub do GC
     else continue; fi
     report_tl "$id" "$cks" "$tldir" && n=$((n+1))
-    # re-envia também o LOG da calibração (sem o pkgdir -> sem os report.html, fica leve) p/ a
+    # re-envia também o LOG da calibração (sem o pkgdir -> sem os report.html, fica leve;
+    # o vetor `sols` VAI junto — a cópia .calib-sols.json mora aqui no dir do cache) p/ a
     # interface não perder o "ver log" de cada juiz depois que o agente reinicia.
     [[ -f "$d/.calib.log" ]] && report_calib_log "$id" "$cks" "$d/.calib.log"
   done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)

@@ -23,6 +23,12 @@ Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README
     apply) > agent.env** — restart nunca diverge (C5 do incidente 2026-07-15). 1 instância
     por host (duas capabilities na mesma máquina teriam cpusets sobrepostos — não particione
     nesse caso). Modo ROOT força 1 slot (cset/cgroup do cage-run são globais).
+  - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports, o
+    campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
+    via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;
+    pkg presente SEM o arquivo remove a cópia (nunca re-enviar dado velho). O `_job_cap`
+    considera o **`TLOVERRIDE`** do conf (o autor pode subir o TL na marra — o teto de
+    wall-clock tem de acompanhar, senão mataria job legítimo).
   - **ANTI-WEDGE (lições do incidente 2026-07-15)**: (1) **teto de wall-clock DINÂMICO** por
     julgamento (`_job_cap`: TL×testes×2 + compile + folga) e por calibração (`_calib_cap`:
     CALIBRATIONTL×testes×soluções×2 + folga), aplicado com `timeout` que mata o GRUPO —
