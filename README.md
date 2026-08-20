@@ -32,6 +32,12 @@ make install CAP=pos MOJ_API=https://moj.naquadah.com.br/api/v1 \
 # capability: pos | gpu | cm | hu  (uma instância por capacidade)
 ```
 
+Outras flags do `install.sh` que o `make` não expõe (passe por `INSTALL_FLAGS`): **`--yes`**
+(não pergunta nada — é o que torna a instalação scriptável), **`--check`** (só roda o doctor e
+**não escreve nada**; é o que o `make doctor` usa), **`--partition off|numa|cpus:N`** e
+**`--reserve N`** (já instala a máquina particionada, sem precisar editar o `agent.env` depois) e
+**`--cache <dir>`** (move o cache de pacotes p/ um disco com espaço).
+
 > **Linger é obrigatório** (com `--systemd user`, o default): sem ele o user manager morre no
 > logout — o agente cai junto **e**, pior, o limite **duro** de memória da jaula some (ele vem de
 > `systemd-run --user --scope -p MemoryMax`, que precisa do user manager; sem isso sobra só o "MLE
@@ -134,6 +140,27 @@ só quando o pacote não dá p/ estimar) e `AGENT_LOCK_WAIT` (espera máx no flo
 default 3600s). O scratch de cada job vive num **TMPDIR próprio** (`AGENT_WORK`, default
 `/tmp/moj-agent-work.<host>/s<slot>.<epoch>.<rand>`) removido no fim — slots nunca compartilham
 diretório de escrita.
+
+## O cache de pacotes (e como ele se limpa)
+
+O agente baixa o pacote de cada problema sob demanda p/ o `JUDGE_CACHE` (default
+`~/.cache/moj/problems`) e o reaproveita — é isso que evita re-baixar e **recalibrar** a cada
+submissão. Ele **não cresce para sempre**:
+
+- cada uso carimba `.last-used`, e a cada `AGENT_CACHE_GC_HOURS` (default 6) **com o juiz livre**
+  o agente varre o cache;
+- pacote sem uso há `AGENT_CACHE_MAX_DAYS` (default 14; `0` desliga) vira **stub**: o `pkg/` (o
+  peso: testes, soluções, binários) é apagado, mas o `.moj-cache.json` e o `tl.<host>` **ficam** —
+  no próximo uso, se o checksum for o MESMO, o TL é **restaurado sem recalibrar**. Checksum novo
+  recalibra, como sempre;
+- `AGENT_CACHE_MAX_MB` (default `0` = sem teto) é o teto opcional de disco, com evicção LRU.
+
+O sweep respeita o flock por-problema e pula download em curso, então não atropela julgamento.
+
+**Limpar o cache de um juiz sem SSH:** `moj judges clearcache <host>` (admin). O comando chega
+pelo heartbeat e é **exclusivo**: o agente **drena todos os slots** antes de executar, apaga o
+cache e se re-registra com inventário vazio — nada é interrompido no meio. Use quando um juiz
+ficou com pacote velho ou corrompido; tudo é re-baixado e recalibrado sob demanda.
 
 ## Deploy em várias máquinas
 

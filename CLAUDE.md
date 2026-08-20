@@ -1,8 +1,9 @@
 # judge — agente pull do juiz
 
 Código que roda **nas máquinas de julgamento** (sem server/web). **Ver `README.md`** (tabela dos
-3 repos, layout, como subir). Workspace multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona
-`judge` + `mojtools` (sandbox) — **não** o `cdmoj`.
+DOIS repos que o juiz clona, instalação, rootfs, cache do agente e como subir). Workspace
+multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` (sandbox) —
+**não** o `cdmoj`.
 
 ## Peças
 
