@@ -508,13 +508,26 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   # TETO DE WALL-CLOCK dinâmico (TL×testes×2 + compile + folga) com kill do GRUPO: um job
   # preso em infra/sandbox morre sozinho e o slot reporta Judge Error — nunca entope o juiz.
   jcap="$(_job_cap "$pkg" "$lang")"
-  out="$(MOJ_PROBLEM_ID="$problem" timeout -k 10 "$jcap" bash "$BAT" "$lang" "$src" "$pkg" y 2>/dev/null)"
+  # stderr do b-a-t em ARQUIVO (era /dev/null): quando ele morre por sinal, a única pista do
+  # motivo é essa — a Maratona 29/08 custou uma manhã de forense por causa do descarte.
+  out="$(MOJ_PROBLEM_ID="$problem" timeout -k 10 "$jcap" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
   jrc=$?
   wb="$(printf '%s\n' "$out" | head -n1)"
   verdict="$(printf '%s\n' "$out" | tail -n1)"
+  local batdead=0
   if (( jrc == 124 || jrc == 137 )); then
     verdict="Judge Error (teto de wall-clock do job: ${jcap}s)"
     alog "job id=$id MORTO no teto de ${jcap}s (problema $problem)"
+  fi
+  # b-a-t morto NO MEIO (Maratona 29/08: stderr de 79 MB/teste do time entrava inteiro no
+  # run-trace.log via LOG "$(<f)" e o ulimit -f matava o próprio harness com SIGXFSZ): a
+  # saída para na 1ª linha e o tail -n1 devolvia o CAMINHO DO WORKDIR como "veredicto" — o
+  # servidor segurava lixo p/ revisão, sem report, e o juiz decidia às cegas. Workdir como
+  # veredicto nunca é legítimo.
+  if [[ "$verdict" == "$wb" || -d "$verdict" ]]; then
+    batdead=1
+    alog "b-a-t morreu SEM veredicto id=$id rc=$jrc stderr: $(tail -c 300 "$work/bat.stderr" 2>/dev/null | tr '\n' ' ')"
+    verdict="Judge Error (build-and-test morreu sem veredicto; rc=$jrc)"
   fi
   [[ -n "$verdict" ]] || verdict="Judge Error (no verdict)"
 
@@ -526,7 +539,7 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   # canônico p/ casar o auto-veredicto (fallback: tira o sufixo ,Np do verdict); score do report.env
   # (corrige subtarefas, onde o regex [0-9]+p$ falhava) com fallback p/ o regex no FINALRESP.
   vcanon="${VERDICT_CANON:-${verdict%%,*}}"
-  (( jrc == 124 || jrc == 137 )) && vcanon="Judge Error"   # canônico limpo p/ o daemon segurar
+  (( jrc == 124 || jrc == 137 || batdead )) && vcanon="Judge Error"   # canônico limpo p/ o daemon segurar
   score="${SCORE:-$(printf '%s' "$FINALRESP" | grep -oE '[0-9]+p$' | tr -d p)}"
   [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
   smax="${SCORE_MAX:-100}"; [[ "$smax" =~ ^[0-9]+$ ]] || smax=100
