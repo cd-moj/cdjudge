@@ -213,7 +213,7 @@ write_config() {
     [[ -z "$PARTITION" && -n "$_e_part" ]] && PARTITION="$_e_part"
     [[ -z "$RESERVE" && -n "$_e_res" ]] && RESERVE="$_e_res"
     # linhas EXTRAS (MOJ_RESOLVE, AGENT_CACHE_*, AGENT_WORK, …) que o gerador não conhece: mantém
-    _extra="$(grep -vE '^[[:space:]]*(#|$|MOJ_API=|CAPABILITY=|WORKER_TOKEN_FILE=|MOJTOOLS_DIR=|JUDGE_CACHE=|CAGE_ROOT=|HEARTBEAT_SECS=|AGENT_PARTITION=|AGENT_RESERVE=)' "$env" 2>/dev/null)"
+    _extra="$(grep -vE '^[[:space:]]*(#|$|MOJ_API=|CAPABILITY=|WORKER_TOKEN_FILE=|MOJTOOLS_DIR=|JUDGE_CACHE=|CAGE_ROOT=|HEARTBEAT_SECS=|AGENT_PARTITION=|AGENT_RESERVE=)' "$env" 2>/dev/null || true)"
   fi
   local _cage_line
   if [[ "$SYSROOT_MODE" == host ]]; then _cage_line="CAGE_ROOT=host"
