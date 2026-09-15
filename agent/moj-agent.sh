@@ -435,11 +435,11 @@ register() {  # [boot=1] — boot:true faz o servidor RE-ENFILEIRAR o que estava
   local bootj=false; [[ "$boot" == 1 ]] && bootj=true
   body="$(jq -cn --arg host "$AGENT_HOST" --arg cap "$cap" \
     --argjson specs "$specs" --argjson problems "$problems" --argjson langs "$langs" \
-    --argjson toolchain "$toolchain" \
+    --argjson toolchain "$toolchain" --arg os "$(agent_os_pretty)" \
     --arg cage "${CAGE_ROOT:-}" --argjson cb "$cbytes" --arg ih "$INVHASH" \
     --argjson ts "${N_SLOTS:-1}" --arg part "${CFG_PARTITION:-off}" \
     --argjson topo "$(agent_topology_json)" --argjson boot "$bootj" \
-    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs, toolchain:$toolchain,
+    '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs, toolchain:$toolchain, os:$os,
                cage_root:(if $cage=="" then null else $cage end),
                cache_bytes:$cb, inv_hash:$ih,
                total_slots:$ts, partition:$part, topology:$topo, boot:$boot}')"

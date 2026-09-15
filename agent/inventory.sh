@@ -113,6 +113,16 @@ declare -A _VERCMD=(
   [spim]="spim -version" [sh]="bash --version" [kt]="kotlinc -version"
 )
 
+# agent_os_pretty -> PRETTY_NAME do /etc/os-release da JAULA (CAGE_ROOT) ou do host — vai
+# ao registry como `os` e a folha "Ambiente de julgamento" da prova o publica (2026-09-14).
+agent_os_pretty() {
+  local root="${CAGE_ROOT:-}" f="" v=""
+  case "$root" in host|HOST|/|"") f=/etc/os-release;; *) f="$root/etc/os-release"; [[ -r "$f" ]] || f="$root/usr/lib/os-release";; esac
+  [[ -r "$f" ]] && v="$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$f" | head -1)"
+  [[ -n "$v" ]] && v="$v $(uname -m 2>/dev/null)"
+  printf '%s' "${v:0:120}"
+}
+
 # agent_toolchain_json <langs-json> -> {"c":"gcc (Ubuntu …) 13.3.0", "java":"javac 21.0.8", …}
 # Custa UMA jaula por linguagem, então o resultado é CACHEADO em disco e só refeito quando a
 # raiz da jaula, a lista de linguagens ou o mojtools mudam. Falha numa linguagem é ignorada

@@ -56,7 +56,9 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
   - **Jaula no rootfs por padrão** (não no host): `ensure_rootfs` usa o **`$HOME/moj-sysroot` já
     montado** (o operador provisiona/monta; o agente **não recria**). `CAGE_ROOT=host` força o host;
     `AGENT_BUILD_ROOTFS=1` manda construir com make-sysroot.sh se faltar (precisa podman). Ver `mojtools/SANDBOX.md`.
-- `agent/inventory.sh` — reporta CPU/linguagens ao registro.
+- `agent/inventory.sh` — reporta CPU/linguagens/versões do toolchain e o **SO da rootfs** (`os`
+  = `PRETTY_NAME` do `/etc/os-release` da jaula + arch) ao registro — a folha "Ambiente de
+  julgamento" da prova publica os dois (2026-09-14).
 - `etc/agent.env.sample` — modelo de config (copie p/ `etc/agent.env`, gitignored).
 
 > O cluster legado (master `:27000` + `root-daemon*`/`job-receiveitor*` + `sistema_escalonador/`)
