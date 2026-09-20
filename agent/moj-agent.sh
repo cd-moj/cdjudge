@@ -218,6 +218,12 @@ _calib_cap() {
 
 # ensure_cached <id> [force_report] [full] [req_epoch] : garante o pacote no cache p/ a versão
 # ATUAL e que o TL esteja calibrado+reportado. Baixa+calibra na 1ª vez ou se o checksum mudou.
+# ⚠ O `checksum` do /judge/package-meta é OPACO p/ o agente e quem o define é o SERVIDOR: desde
+# 2026-09-20 ele é a VERSÃO do pacote (`tl-checksum.sh --all-sols`: o conjunto que afeta o TL MAIS
+# o `sols/` inteiro), e não o `tl_checksum` estreito. Antes, salvar uma solução `pass|slow|wrong`
+# não mudava o valor e o `full` abaixo ("reaproveita o pacote do cache") recalibrava o `sols/`
+# VELHO — o autor via o juiz rodar solução que ele apagou e ignorar a que acabou de escrever.
+# Nunca calcule o checksum aqui: ele é o que o servidor disser.
 # full=1 força recalibração rodando TODAS as soluções (Calibrar explícito). req_epoch = quando o
 # PEDIDO foi feito (requested_at do update / at do comando): full de um pedido MAIS VELHO que a
 # última calibração full do MESMO checksum é duplicata satisfeita — skip (checksum novo SEMPRE

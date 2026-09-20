@@ -145,7 +145,15 @@ diretório de escrita.
 
 O agente baixa o pacote de cada problema sob demanda p/ o `JUDGE_CACHE` (default
 `~/.cache/moj/problems`) e o reaproveita — é isso que evita re-baixar e **recalibrar** a cada
-submissão. Ele **não cresce para sempre**:
+submissão.
+
+A chave desse cache é o **`checksum` que o `/judge/package-meta` devolve**: para o agente ele é um
+valor **opaco** (igual = cache bom, diferente = re-baixa), e quem decide o que ele cobre é o
+servidor. Desde 2026-09-20 é a **versão do pacote** — tudo que afeta o tempo-limite **mais o
+`sols/` inteiro —, justamente para que salvar uma solução `pass`/`slow`/`wrong` chegue ao juiz: com
+a chave antiga, o "Calibrar" reaproveitava o pacote do cache e recalibrava as soluções **velhas**.
+
+Ele **não cresce para sempre**:
 
 - cada uso carimba `.last-used`, e a cada `AGENT_CACHE_GC_HOURS` (default 6) **com o juiz livre**
   o agente varre o cache;
