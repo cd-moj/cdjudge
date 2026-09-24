@@ -455,10 +455,12 @@ register() {  # [boot=1] — boot:true faz o servidor RE-ENFILEIRAR o que estava
     --arg cage "${CAGE_ROOT:-}" --argjson cb "$cbytes" --arg ih "$INVHASH" \
     --argjson ts "${N_SLOTS:-1}" --arg part "${CFG_PARTITION:-off}" \
     --argjson topo "$(agent_topology_json)" --argjson boot "$bootj" \
+    --argjson sc "${SLOT_CPUS_MIN:-1}" --argjson sbn "${SLOTS_BY_NODE_JSON:-{\}}" --argjson smt "${SMT_ON:-false}" \
     '$specs + {host:$host, capability:$cap, problems:$problems, langs:$langs, toolchain:$toolchain, os:$os,
                cage_root:(if $cage=="" then null else $cage end),
                cache_bytes:$cb, inv_hash:$ih,
-               total_slots:$ts, partition:$part, topology:$topo, boot:$boot}')"
+               total_slots:$ts, partition:$part, topology:$topo, boot:$boot,
+               slot_cpus:$sc, slots_by_node:$sbn, smt:$smt}')"
   # VALIDAR O CORPO, não só o transporte: um proxy/landing errado responde 200 com HTML e o
   # agente "se registrava" de mentira — sem register real não há requeue boot:true e o claim
   # do agente anterior vira FANTASMA imortal (o keepalive do heartbeat renova o mtime p/
@@ -672,7 +674,8 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}  $2 = cpuset do slot (
 # SLOT_TMP  = TMPDIR do job em voo (removido no reap); SLOT_KIND/SLOT_META = o que roda no slot
 # (job|update|command + JSON mínimo SEM code_b64) p/ reportar ao servidor se o job for MORTO;
 # SLOT_NODE = nó NUMA do slot ("" = sem topologia/sem pin).
-declare -a SLOT_CPUS=() SLOT_PID=() SLOT_TMP=() SLOT_KIND=() SLOT_META=() SLOT_NODE=()
+# SLOT_ALLOC/SLOT_RELEASED (só no PRIMÁRIO de um job largo) = slots por grupo e grupos já liberados.
+declare -a SLOT_CPUS=() SLOT_PID=() SLOT_TMP=() SLOT_KIND=() SLOT_META=() SLOT_NODE=() SLOT_ALLOC=() SLOT_RELEASED=()
 : "${AGENT_SYSFS:=/sys}"   # raiz do sysfs (o teste do agente aponta p/ uma árvore FALSA)
 CFG_PARTITION="$AGENT_PARTITION" CFG_RESERVE="$AGENT_RESERVE" CFG_DISABLED=false
 AGENT_CFG_HASH=""    # hash da config aplicada (o servidor reenvia quando muda)
@@ -773,7 +776,215 @@ build_slots() {
     SLOT_CPUS=(""); SLOT_NODE=(""); SLOT_PID=(0); SLOT_TMP=(); SLOT_KIND=(); SLOT_META=()
   fi
   N_SLOTS=${#SLOT_CPUS[@]}
-  alog "slots: $N_SLOTS (partition=$mode reserve=$reserve)$( ((N_SLOTS>1)) && printf ' cpusets: %s' "${SLOT_CPUS[*]}" )"
+  SLOT_ALLOC=(); SLOT_RELEASED=()
+  _slots_topology
+  alog "slots: $N_SLOTS (partition=$mode reserve=$reserve; menor slot ${SLOT_CPUS_MIN} cpu(s); smt=$SMT_ON; por nó $SLOTS_BY_NODE_JSON)$( ((N_SLOTS>1)) && printf ' cpusets: %s' "${SLOT_CPUS[*]}" )"
+}
+
+# ---- topologia dos slots: irmãos SMT, menor slot, slots por nó (calculada em build_slots) -----
+# CPU_SIB[cpu] = o irmão de hyperthreading (thread_siblings_list; vazio = sem SMT). SLOT_CPUS_MIN =
+# cpus do MENOR slot (1 em produção; = ncpu com partition off) — é o `slot_cpus` do protocolo.
+# SLOTS_BY_NODE_JSON = {"<nó>": n} — o servidor confere `SAMENUMA` por ele.
+declare -A CPU_SIB=()
+SMT_ON=false; SLOT_CPUS_MIN=1; SLOTS_BY_NODE_JSON='{}'
+_slots_topology() {
+  local i c cnt min=0 sib s f n
+  local -A bn=()
+  CPU_SIB=(); SMT_ON=false
+  for i in "${!SLOT_CPUS[@]}"; do
+    if [[ -z "${SLOT_CPUS[i]}" ]]; then
+      cnt="$(jq -r '.ncpu // 1' <<<"${AGENT_SPECS:-{\}}" 2>/dev/null)"; [[ "$cnt" =~ ^[0-9]+$ && "$cnt" -ge 1 ]] || cnt=1
+    else
+      cnt=0
+      for c in $(_cpus_expand "${SLOT_CPUS[i]}"); do
+        cnt=$((cnt+1))
+        f="$AGENT_SYSFS/devices/system/cpu/cpu$c/topology/thread_siblings_list"
+        [[ -f "$f" ]] || continue
+        sib="$(<"$f")"
+        for s in $(_cpus_expand "$sib"); do
+          (( s != c )) && { CPU_SIB[$c]="$s"; SMT_ON=true; break; }
+        done
+      done
+    fi
+    (( min == 0 || cnt < min )) && min=$cnt
+    n="${SLOT_NODE[i]:--}"; bn[$n]=$(( ${bn[$n]:-0} + 1 ))   # "-" = sem nó (chave vazia é erro no assoc)
+  done
+  SLOT_CPUS_MIN=$min
+  SLOTS_BY_NODE_JSON="$(for n in "${!bn[@]}"; do printf '%s\t%s\n' "$n" "${bn[$n]}"; done \
+    | jq -RnSc '[inputs | split("\t") | {(.[0]): (.[1]|tonumber)}] | add // {}' 2>/dev/null)"
+  [[ -n "$SLOTS_BY_NODE_JSON" ]] || SLOTS_BY_NODE_JSON='{}'
+}
+
+# _max_free_group -> maior nº de slots LIVRES dentro de UM nó (o `max_free_group` do heartbeat;
+# com ele o servidor sabe se um job SAMENUMA cabe aqui sem tentar).
+_max_free_group() {
+  local i n max=0
+  local -A fn=()
+  for i in "${!SLOT_PID[@]}"; do
+    (( SLOT_PID[i] == 0 )) || continue
+    n="${SLOT_NODE[i]:--}"; fn[$n]=$(( ${fn[$n]:-0} + 1 ))
+    (( fn[$n] > max )) && max=${fn[$n]}
+  done
+  printf '%s' "$max"
+}
+
+# ---- alocação de CPUs p/ um job: alloc_slots <k> <P> <same_numa y|n> [cap] -------------------
+# Escolhe até P GRUPOS de k CPUs entre os slots LIVRES e deixa em ALLOC_GROUPS (cpulist por grupo,
+# "" = sem pin) e ALLOC_SLOTS (índices dos slots consumidos; o 1º é o PRIMÁRIO). Regras:
+#   · um grupo fica DENTRO de um nó (sempre preferido; obrigatório com same_numa=y);
+#   · com SMT e k ≥ 2 o grupo é feito de NÚCLEOS INTEIROS (os dois irmãos) — a mesma forma na
+#     calibração e no julgamento; cpu sem o irmão livre não entra num grupo de k ≥ 2;
+#   · P limita os grupos que consomem slot NOVO; cpus SOBRANDO num slot já consumido (partition
+#     numa/off: slot maior que k) formam grupos extras de graça, até `cap` (MAXPARALLELTESTS);
+#   · nós com mais cpus livres primeiro; sem same_numa, sobras de nós diferentes ainda podem
+#     compor um grupo no fim.
+# Devolve 1 sem NENHUM grupo (⇒ o chamador recusa o trabalho: /judge/decline). Função pura
+# sobre SLOT_* (testável).
+declare -a ALLOC_GROUPS=() ALLOC_SLOTS=()
+alloc_slots() {
+  local k="$1" P="$2" numa="${3:-n}" cap="${4:-}" i c n node rest=""
+  ALLOC_GROUPS=(); ALLOC_SLOTS=(); ALLOC_USED=" "; ALLOC_NEW=0
+  [[ "$k" =~ ^[0-9]+$ && "$k" -ge 1 ]] || k=1
+  [[ "$P" =~ ^[0-9]+$ && "$P" -ge 1 ]] || P=1
+  [[ "$cap" =~ ^[0-9]+$ && "$cap" -ge 1 ]] || cap=$P
+  (( cap < P )) && cap=$P
+  local -A NC=() NN=()
+  for i in "${!SLOT_PID[@]}"; do
+    (( SLOT_PID[i] == 0 )) || continue
+    n="${SLOT_NODE[i]:--}"
+    if [[ -z "${SLOT_CPUS[i]}" ]]; then   # slot sem pin (partition off): a máquina inteira
+      local ncpu; ncpu="$(jq -r '.ncpu // 1' <<<"${AGENT_SPECS:-{\}}" 2>/dev/null)"; [[ "$ncpu" =~ ^[0-9]+$ ]] || ncpu=1
+      local g=$(( ncpu / k )); (( g < 1 )) && g=1; (( g > cap )) && g=$cap
+      ALLOC_SLOTS=("$i"); for (( c=0; c<g; c++ )); do ALLOC_GROUPS+=(""); done
+      return 0
+    fi
+    for c in $(_cpus_expand "${SLOT_CPUS[i]}"); do NC[$n]+="$c:$i "; NN[$n]=$(( ${NN[$n]:-0} + 1 )); done
+  done
+  (( ${#NN[@]} > 0 )) || return 1
+  while IFS= read -r node; do
+    [[ -n "$node" ]] || continue
+    _alloc_from_list "${NC[$node]}" "$k" "$P" "$cap"
+    rest+="$ALLOC_REST"
+  done < <(for n in "${!NN[@]}"; do printf '%s\t%s\n' "${NN[$n]}" "$n"; done | sort -rn -k1,1 | cut -f2)
+  [[ "$numa" != y && -n "$rest" ]] && _alloc_from_list "$rest" "$k" "$P" "$cap"
+  (( ${#ALLOC_GROUPS[@]} > 0 )) || return 1
+  return 0
+}
+# _alloc_from_list "<cpu:slot …>" k P cap : corta a lista em grupos de k cpus (núcleos inteiros com
+# SMT e k ≥ 2), respeitando P (slots novos) e cap (total); ALLOC_REST = o que não entrou.
+_alloc_from_list() {
+  local list="$1" k="$2" P="$3" cap="$4" e c s take=() rest=() paired=() single=() cpus slots isnew
+  local -A seen=()
+  ALLOC_REST=""
+  if [[ "$SMT_ON" == true ]] && (( k >= 2 )); then
+    # reordena: pares (cpu, irmão) ambos na lista vão na frente, juntos; sem par = sobra
+    local -A pos=()
+    for e in $list; do pos[${e%%:*}]="$e"; done
+    for e in $list; do
+      c="${e%%:*}"; [[ -n "${seen[$c]:-}" ]] && continue
+      s="${CPU_SIB[$c]:-}"
+      if [[ -n "$s" && -n "${pos[$s]:-}" && -z "${seen[$s]:-}" ]]; then
+        paired+=("$e" "${pos[$s]}"); seen[$c]=1; seen[$s]=1
+      else single+=("$e"); seen[$c]=1; fi
+    done
+    list="${paired[*]}"; rest=("${single[@]}")
+    k=$(( ((k + 1) / 2) * 2 ))   # núcleos inteiros
+  fi
+  set -- $list
+  while (( $# >= k )); do
+    (( ${#ALLOC_GROUPS[@]} >= cap )) && break
+    take=("${@:1:k}")
+    isnew=0; for e in "${take[@]}"; do [[ "$ALLOC_USED" == *" ${e#*:} "* ]] || isnew=1; done
+    if (( isnew )) && (( ALLOC_NEW >= P )); then break; fi
+    cpus=""; for e in "${take[@]}"; do cpus+="${cpus:+,}${e%%:*}"; done
+    ALLOC_GROUPS+=("$cpus")
+    (( isnew )) && ALLOC_NEW=$((ALLOC_NEW+1))
+    for e in "${take[@]}"; do s="${e#*:}"
+      [[ "$ALLOC_USED" == *" $s "* ]] || { ALLOC_USED+="$s "; ALLOC_SLOTS+=("$s"); }
+    done
+    shift "$k"
+  done
+  rest+=("$@")
+  ALLOC_REST="${rest[*]}${rest[*]:+ }"
+}
+
+# _alloc_env : monta, a partir de ALLOC_GROUPS, o que vai p/ o build-and-test: ALLOC_UNION
+# (cpulist da união = pin do subshell) e ALLOC_GROUPS_STR ("g0|g1|…", vazio = sem pin).
+_alloc_env() {
+  local g u="" any=0
+  ALLOC_GROUPS_STR=""; ALLOC_UNION=""
+  for g in "${ALLOC_GROUPS[@]}"; do
+    [[ -n "$g" ]] && { any=1; u+="${u:+,}$g"; }
+    ALLOC_GROUPS_STR+="${ALLOC_GROUPS_STR:+|}$g"
+  done
+  (( any )) || ALLOC_GROUPS_STR=""
+  ALLOC_UNION="$u"
+}
+
+# _slot_take <pid> <kind> <meta> <tmp> : registra o job em TODOS os slots de ALLOC_SLOTS — o 1º é o
+# PRIMÁRIO (guarda pid/tmp/kind/meta e a alocação por grupo); os demais são MEMBROS (mesmo pid,
+# kind=member, meta = índice do primário, sem tmp). Deixa o índice do primário em TAKEN_PRIMARY
+# (nunca chame por $(…): as mudanças em SLOT_* morreriam no subshell).
+_slot_take() {
+  local pid="$1" kind="$2" meta="$3" tmp="$4" p="${ALLOC_SLOTS[0]}" s g alloc="" first=1
+  SLOT_PID[p]=$pid; SLOT_KIND[p]="$kind"; SLOT_META[p]="$meta"; SLOT_TMP[p]="$tmp"; SLOT_RELEASED[p]=" "
+  for s in "${ALLOC_SLOTS[@]:1}"; do SLOT_PID[s]=$pid; SLOT_KIND[s]=member; SLOT_META[s]="$p"; SLOT_TMP[s]=""; done
+  # alocação por grupo ("slots do g0|slots do g1|…"), p/ a liberação de cauda
+  for g in "${!ALLOC_GROUPS[@]}"; do
+    local e cpus="${ALLOC_GROUPS[g]}" gs=""
+    for s in "${ALLOC_SLOTS[@]}"; do
+      [[ -z "$cpus" ]] && { gs="$s"; break; }
+      for e in $(_cpus_expand "$cpus"); do
+        [[ " $(_cpus_expand "${SLOT_CPUS[s]}") " == *" $e "* ]] && { gs+="${gs:+ }$s"; break; }
+      done
+    done
+    alloc+="${first:+}${alloc:+|}$gs"; first=""
+  done
+  SLOT_ALLOC[p]="$alloc"
+  TAKEN_PRIMARY="$p"
+}
+
+# _release_tail <primário> : lê $TMPDIR/released do job (índices de grupo que o build-and-test
+# anotou: ficaram sem teste) e devolve os slots que SÓ esses grupos usavam. Idempotente (o arquivo
+# é append-only, o mesmo índice pode repetir); o grupo 0 nunca é liberado (é o do rerun/primário).
+_release_tail() {
+  local p="$1" f="${SLOT_TMP[p]:-}/released" g s gs other ok
+  [[ -n "${SLOT_TMP[p]:-}" && -s "$f" && -n "${SLOT_ALLOC[p]:-}" ]] || return 0
+  local -a GS; IFS='|' read -ra GS <<<"${SLOT_ALLOC[p]}"
+  while IFS= read -r g; do
+    [[ "$g" =~ ^[0-9]+$ ]] && (( g >= 1 && g < ${#GS[@]} )) || continue
+    [[ "${SLOT_RELEASED[p]}" == *" $g "* ]] && continue
+    SLOT_RELEASED[p]+="$g "
+    for s in ${GS[g]}; do
+      (( s == p )) && continue
+      ok=1   # só solta o slot se nenhum grupo AINDA VIVO o usa (partition numa: slot > k)
+      for other in "${!GS[@]}"; do
+        (( other == g )) && continue
+        [[ "${SLOT_RELEASED[p]}" == *" $other "* ]] && continue
+        [[ " ${GS[other]} " == *" $s "* ]] && { ok=0; break; }
+      done
+      (( ok )) || continue
+      SLOT_PID[s]=0; SLOT_KIND[s]=""; SLOT_META[s]=""; SLOT_TMP[s]=""
+      alog "cauda: grupo $g do job no slot $p liberou o slot $s"
+    done
+  done < "$f"
+  return 0
+}
+
+# _decline <kind job|update|command> <json> <motivo> : devolve ao servidor um trabalho que não
+# coube (corrida entre o claim e a alocação): o servidor reenfileira. Servidor antigo (sem a rota)
+# ignora — o job volta pelo ASSIGN_TTL como sempre.
+_decline() {
+  local kind="$1" j="$2" why="$3" body
+  case "$kind" in
+    job)     body="$(jq -cn --arg h "$AGENT_HOST" --arg w "$why" --arg id "$(jq -r '.id // ""' <<<"$j")" '{host:$h, reason:$w, id:$id}')" ;;
+    update)  body="$(jq -cn --arg h "$AGENT_HOST" --arg w "$why" --arg r "$(jq -r '.reqid // ""' <<<"$j")" '{host:$h, reason:$w, reqid:$r}')" ;;
+    command) body="$(jq -cn --arg h "$AGENT_HOST" --arg w "$why" --argjson c "$j" '{host:$h, reason:$w, command:$c}')" ;;
+    *) return 0 ;;
+  esac
+  alog "recusando $kind ($why)"
+  _api /judge/decline "$body" >/dev/null || alog "decline não aceito pelo servidor (antigo?)"
+  return 0
 }
 
 # aplica a config pendente (chamar SÓ com todos os slots livres)
@@ -897,16 +1108,21 @@ _reap_slots() {
   for i in "${!SLOT_PID[@]}"; do
     pid="${SLOT_PID[i]:-0}"
     if (( pid != 0 )) && ! kill -0 "$pid" 2>/dev/null; then
-      SLOT_PID[i]=0; SLOT_KIND[i]=""; SLOT_META[i]=""
+      # membro (mesmo pid do primário) cai aqui junto: sem TMP, nada a apagar
+      SLOT_PID[i]=0; SLOT_KIND[i]=""; SLOT_META[i]=""; SLOT_ALLOC[i]=""; SLOT_RELEASED[i]=""
       [[ -n "${SLOT_TMP[i]:-}" ]] && rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
-    elif (( pid != 0 )) && [[ -n "${SLOT_TMP[i]:-}" && -s "${SLOT_TMP[i]}/.deadline" ]]; then
-      dl=""; cap=""; read -r dl cap < "${SLOT_TMP[i]}/.deadline" 2>/dev/null || :   # sem \n final o read dá rc 1 mas ATRIBUI
-      if [[ "$dl" =~ ^[0-9]+$ ]] && (( EPOCHSECONDS > dl )); then
-        alog "slot $i MORTO no teto de wall-clock (${cap:-?}s): $(jq -r '.id // .reqid // .target // "?"' <<<"${SLOT_META[i]:-null}" 2>/dev/null)"
-        _kill_tree "$pid"
-        _report_slot_killed "$i" "teto de wall-clock: ${cap:-?}s"
-        SLOT_PID[i]=0
-        rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
+    elif (( pid != 0 )); then
+      # liberação de cauda: o build-and-test anotou grupos que ficaram sem teste
+      [[ "${SLOT_KIND[i]:-}" == job && -n "${SLOT_ALLOC[i]:-}" ]] && _release_tail "$i"
+      if [[ -n "${SLOT_TMP[i]:-}" && -s "${SLOT_TMP[i]}/.deadline" ]]; then
+        dl=""; cap=""; read -r dl cap < "${SLOT_TMP[i]}/.deadline" 2>/dev/null || :   # sem \n final o read dá rc 1 mas ATRIBUI
+        if [[ "$dl" =~ ^[0-9]+$ ]] && (( EPOCHSECONDS > dl )); then
+          alog "slot $i MORTO no teto de wall-clock (${cap:-?}s): $(jq -r '.id // .reqid // .target // "?"' <<<"${SLOT_META[i]:-null}" 2>/dev/null)"
+          _kill_tree "$pid"
+          _report_slot_killed "$i" "teto de wall-clock: ${cap:-?}s"
+          SLOT_PID[i]=0; SLOT_ALLOC[i]=""; SLOT_RELEASED[i]=""
+          rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
+        fi
       fi
     fi
     (( SLOT_PID[i] == 0 )) && FREE=$((FREE+1))
@@ -971,30 +1187,67 @@ _beat_dispatch() {
     if [[ "$(jq -r '.action // ""' <<<"$cmd")" == clearcache ]]; then
       PENDING_CMD="$cmd"; alog "clearcache agendado — drenando slots p/ executar"
     else
-      i="$(_free_slot)" && { jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
-        TMPDIR="$jt" run_command "$cmd" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
-        SLOT_TMP[i]="$jt"; SLOT_KIND[i]=command; SLOT_META[i]=""
-        alog "comando reivindicado $(jq -r '.action // .cmdid' <<<"$cmd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
+      _dispatch_wide command "$cmd"
     fi
   elif [[ -n "$upd" && "$upd" != null ]]; then
-    i="$(_free_slot)" && { jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
-      TMPDIR="$jt" run_update "$upd" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
-      SLOT_TMP[i]="$jt"; SLOT_KIND[i]=update
-      SLOT_META[i]="$(jq -c '{reqid,repo,kind,target}' <<<"$upd" 2>/dev/null)"
-      alog "update reivindicado reqid=$(jq -r '.reqid' <<<"$upd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
+    _dispatch_wide update "$upd"
   else
     # LOTE: o servidor devolve assigned como array (até free_slots) ou escalar (legado)
     jobs="$(jq -c '(.assigned // empty) | if type=="array" then .[] else . end' <<<"$resp" 2>/dev/null)"
     while IFS= read -r job; do
       [[ -n "$job" && "$job" != null ]] || continue
-      i="$(_free_slot)" || break
-      jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
-      TMPDIR="$jt" run_job "$job" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
-      SLOT_TMP[i]="$jt"; SLOT_KIND[i]=job
-      SLOT_META[i]="$(jq -c '{id,contest,problem_id,login,lang}' <<<"$job" 2>/dev/null)"
-      alog "job reivindicado id=$(jq -r '.id' <<<"$job" 2>/dev/null) -> slot $i${SLOT_CPUS[i]:+ [cpus ${SLOT_CPUS[i]}]} pid ${SLOT_PID[i]}"
+      _dispatch_wide job "$job" || break
     done <<<"$jobs"
   fi
+  return 0
+}
+
+# _dispatch_wide <job|update|command> <json> : põe o trabalho em slot(s). Com `test_cpus` no JSON
+# (servidor novo) aloca a LARGURA k (alloc_slots: job = até par_max grupos; calibração = 1 grupo)
+# e entrega o paralelismo ao build-and-test pelo ambiente (MOJ_TEST_CPUS/MOJ_PARALLEL/
+# MOJ_CPU_GROUPS/MOJ_RELEASE_FILE); sem `test_cpus` (servidor antigo) é o caminho de sempre: 1
+# slot, sem env. Não coube ⇒ /judge/decline (rc 1: o lote para — o próximo também não cabe).
+_dispatch_wide() {
+  local kind="$1" j="$2" i jt tc numa par cap p pid union gs P label
+  IFS=$'\x01' read -r tc numa par cap label < <(jq -j '[((.test_cpus // "")|tostring), ((.same_numa // false)|tostring),
+      ((.par_max // 1)|tostring), ((.par_cap // .par_max // 1)|tostring),
+      (.id // .reqid // .action // .cmdid // "?")] | join("\u0001")' <<<"$j" 2>/dev/null)
+  if [[ -z "$tc" ]]; then   # LEGADO: 1 slot, sem env de paralelismo
+    i="$(_free_slot)" || return 1
+    jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
+    case "$kind" in
+      job)     TMPDIR="$jt" run_job "$j" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
+               SLOT_KIND[i]=job; SLOT_META[i]="$(jq -c '{id,contest,problem_id,login,lang}' <<<"$j" 2>/dev/null)" ;;
+      update)  TMPDIR="$jt" run_update "$j" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
+               SLOT_KIND[i]=update; SLOT_META[i]="$(jq -c '{reqid,repo,kind,target}' <<<"$j" 2>/dev/null)" ;;
+      command) TMPDIR="$jt" run_command "$j" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
+               SLOT_KIND[i]=command; SLOT_META[i]="" ;;
+    esac
+    SLOT_TMP[i]="$jt"; SLOT_ALLOC[i]=""; SLOT_RELEASED[i]=""
+    alog "$kind reivindicado $label -> slot $i${SLOT_CPUS[i]:+ [cpus ${SLOT_CPUS[i]}]} pid ${SLOT_PID[i]}"
+    return 0
+  fi
+  local ny=n; [[ "$numa" == true ]] && ny=y
+  [[ "$kind" == job ]] || { par=1; cap=1; }   # calibração: um teste por vez, largura k
+  if ! alloc_slots "$tc" "$par" "$ny" "$cap"; then
+    _decline "$kind" "$j" "sem $tc cpu(s) livres$([[ "$ny" == y ]] && printf ' num nó NUMA')"
+    return 1
+  fi
+  _alloc_env; P=${#ALLOC_GROUPS[@]}; union="$ALLOC_UNION"; gs="$ALLOC_GROUPS_STR"
+  p="${ALLOC_SLOTS[0]}"
+  jt="$AGENT_WORK/s$p.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
+  case "$kind" in
+    job)     MOJ_TEST_CPUS="$tc" MOJ_PARALLEL="$P" MOJ_CPU_GROUPS="$gs" MOJ_RELEASE_FILE="$jt/released" \
+               TMPDIR="$jt" run_job "$j" "$union" 8>&- & pid=$!
+             _slot_take "$pid" job "$(jq -c '{id,contest,problem_id,login,lang}' <<<"$j" 2>/dev/null)" "$jt" ;;
+    update)  MOJ_TEST_CPUS="$tc" MOJ_PARALLEL=1 MOJ_CPU_GROUPS="$gs" \
+               TMPDIR="$jt" run_update "$j" "$union" 8>&- & pid=$!
+             _slot_take "$pid" update "$(jq -c '{reqid,repo,kind,target}' <<<"$j" 2>/dev/null)" "$jt" ;;
+    command) MOJ_TEST_CPUS="$tc" MOJ_PARALLEL=1 MOJ_CPU_GROUPS="$gs" \
+               TMPDIR="$jt" run_command "$j" "$union" 8>&- & pid=$!
+             _slot_take "$pid" command "" "$jt" ;;
+  esac
+  alog "$kind reivindicado $label -> slots ${ALLOC_SLOTS[*]} (k=$tc, $P grupo(s)${gs:+: $gs}) pid $pid"
   return 0
 }
 
@@ -1065,7 +1318,9 @@ while true; do
   resp="$(_api /judge/heartbeat \
     "$(jq -cn --arg h "$AGENT_HOST" --arg s "$state" --arg ih "$INVHASH" --arg ch "$AGENT_CFG_HASH" \
        --argjson fs "$CLAIMABLE" --argjson ts "$N_SLOTS" --arg st "$hstatus" \
-       '{host:$h, state:$s, inv_hash:$ih, cfg_hash:$ch, free_slots:$fs, total_slots:$ts, status:$st}')")"
+       --argjson sc "${SLOT_CPUS_MIN:-1}" --argjson mfg "$( (( CLAIMABLE > 0 )) && _max_free_group || echo 0 )" \
+       '{host:$h, state:$s, inv_hash:$ih, cfg_hash:$ch, free_slots:$fs, total_slots:$ts, status:$st,
+         slot_cpus:$sc, max_free_group:$mfg}')")"
   [[ -n "$resp" ]] && _beat_dispatch "$resp"
   sleep "$HEARTBEAT_SECS"
 done

@@ -203,6 +203,17 @@ nó NUMA** (um slot nunca cruza nós; o resto `< N` de cada nó fica fora). A co
 **servidor** (`moj judges config <host>`) chega pelo heartbeat e **vence** o fallback local; config
 igual à aplicada (só o hash mudou) é adotada sem drenar. Ver `CLAUDE.md`.
 
+**Largura k (problemas paralelos, 24/09/2026):** um problema com `CPUNEEDED=k` no conf pede k CPUs
+por teste. O servidor manda no job `test_cpus`/`same_numa`/`par_max`/`par_cap`; o agente **junta k
+slots livres** num grupo (dentro de um nó NUMA — obrigatório com `SAMENUMA=y`; com hyperthreading e
+k ≥ 2, núcleos inteiros), roda o julgamento pinado na união dos grupos e entrega ao `build-and-test`
+quantos testes podem rodar ao mesmo tempo (`MOJ_PARALLEL`) e em quais CPUs (`MOJ_CPU_GROUPS`); os
+slots que ficam sem teste no fim são **devolvidos antes do fim do job** (`released`). Não coube
+(corrida entre o claim e a alocação) ⇒ `POST /judge/decline` e o servidor reenfileira. A calibração
+de um problema desses roda um teste por vez em k CPUs. O register informa `slot_cpus`
+(CPUs do menor slot), `slots_by_node` e `smt`; o heartbeat, `max_free_group`. Servidor antigo (job
+sem `test_cpus`) = comportamento de sempre. Guia do autor: `mojtools/docs/problema-paralelo.md`.
+
 ## Legado (aposentado)
 
 O cluster síncrono (`root-daemon*`/`job-receiveitor*` via `nc` + `sistema_escalonador/` master

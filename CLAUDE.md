@@ -37,6 +37,26 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     por host (duas capabilities na mesma máquina teriam cpusets sobrepostos — não particione
     nesse caso). Modo ROOT força 1 slot (cset/cgroup do cage-run são globais).
     Teste: `test/agent.sh` (`make test`; sysfs FALSO via `AGENT_SYSFS`).
+  - **LARGURA k / grupos de CPU (24/09/2026)** — o job/calibração pode pedir **k CPUs por teste**
+    (`CPUNEEDED` do conf; o servidor manda `test_cpus`, `same_numa`, `par_max` (grupos que podem
+    consumir slot NOVO), `par_cap` (teto = MAXPARALLELTESTS)). **`alloc_slots k P numa cap`**
+    (função pura sobre `SLOT_*`) escolhe até P grupos de k CPUs entre os slots livres: grupo dentro
+    de um nó (obrigatório com `same_numa`; preferido sempre; sem numa, sobras de nós compõem no fim);
+    com SMT (`CPU_SIB`, de `thread_siblings_list`) e k ≥ 2 o grupo é de NÚCLEOS INTEIROS; sobra de
+    um slot já consumido (partition numa/off, slot > k) vira grupo extra de graça até `cap`; partition
+    `off` = P grupos vazios (sem pin). Resultado em `ALLOC_GROUPS`/`ALLOC_SLOTS`; `_alloc_env` dá a
+    união (pin do subshell) e a string `g0|g1|…`; nem 1 grupo ⇒ **`_decline`** (`POST /judge/decline`
+    com `id`/`reqid`/`command`; servidor antigo ignora e o job volta pelo ASSIGN_TTL). O
+    build-and-test recebe `MOJ_TEST_CPUS/MOJ_PARALLEL/MOJ_CPU_GROUPS/MOJ_RELEASE_FILE` (calibração:
+    `MOJ_PARALLEL=1`). **Primário/membros** (`_slot_take`, resultado em `TAKEN_PRIMARY` — nunca por
+    `$(…)`): o 1º slot guarda pid/tmp/kind/meta + `SLOT_ALLOC` ("slots do g0|slots do g1|…"); os
+    demais são `kind=member` com o MESMO pid e `meta` = índice do primário (o reap os solta junto;
+    `_report_slot_killed` ignora member). **Liberação de cauda**: `_release_tail` lê o
+    `$TMPDIR/released` do primário (índices de grupo que o b-a-t anotou; append-only, idempotente
+    via `SLOT_RELEASED`) e solta os slots que só grupos liberados usam (grupo 0 nunca; partition
+    numa: slot com grupo vivo fica). Job sem `test_cpus` (servidor antigo) = caminho de sempre.
+    Register manda `slot_cpus` (menor slot), `slots_by_node`, `smt`; heartbeat manda `slot_cpus` e
+    `max_free_group` (maior nº de slots livres num nó).
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports, o
     campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
     via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;
