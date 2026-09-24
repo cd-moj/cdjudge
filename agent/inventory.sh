@@ -48,7 +48,7 @@ agent_specs_json() {
 # não expõe nodes (VM mínima) — o particionador cai p/ "cpus:X" sobre as cpus online.
 agent_topology_json() {
   local n out='[]' cl
-  for n in /sys/devices/system/node/node[0-9]*; do
+  for n in "${AGENT_SYSFS:-/sys}"/devices/system/node/node[0-9]*; do
     [[ -d "$n" && -f "$n/cpulist" ]] || continue
     cl="$(<"$n/cpulist")"
     out="$(jq -c --argjson i "${n##*node}" --arg c "$cl" '. + [{node:$i, cpus:$c}]' <<<"$out" 2>/dev/null)" || out='[]'

@@ -17,7 +17,7 @@ INSTALL_FLAGS ?=
 REMOTE_DIR ?= moj-judge
 SSH_GAP    ?= 3
 
-.PHONY: help doctor install sysroot sysroot-tar config restart status logs deploy
+.PHONY: help doctor install sysroot sysroot-tar config restart status logs deploy test
 
 help:
 	@sed -n '1,10p' Makefile
@@ -51,6 +51,10 @@ restart:
 	@if systemctl --user is-enabled "moj-agent@$(CAP)" >/dev/null 2>&1; then \
 	  systemctl --user restart "moj-agent@$(CAP)"; echo ">> restart moj-agent@$(CAP) (user)"; \
 	else bash run-agent.sh; fi
+
+## test — o agente por dentro (funções sourced; sem rede, sem jaula): test/agent.sh
+test:
+	bash -n agent/moj-agent.sh agent/inventory.sh && bash test/agent.sh
 
 ## status / logs
 status:

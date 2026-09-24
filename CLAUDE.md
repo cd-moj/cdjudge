@@ -11,19 +11,32 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
   **heartbeat**, baixa o pacote do problema sob demanda p/ um **cache local**
   (`JUDGE_CACHE`, default `~/.cache/moj/problems`), calibra na 1ª vez e **reporta o TL**.
   - **MULTI-SLOT**: a máquina pode ser particionada (`off` = 1 slot; `numa` = 1 slot por
-    NUMA node; `cpus:<X>` = fatias de X cpus; `reserve` tira as N primeiras cpus) e corrigir
+    NUMA node; `cpus:<X>` = fatias de X cpus **dentro de cada nó NUMA** — um slot nunca cruza
+    nós, o resto `< X` de cada nó fica fora (bug (e), 24/09/2026: a fatia por ordem numérica
+    das cpus cruzava nós); `reserve` tira as N primeiras cpus) e corrigir
     N problemas AO MESMO TEMPO — cada job/calibração roda num subshell PINADO ao cpuset do
     slot (`taskset -pc` no próprio $BASHPID; herda p/ bwrap/compilador/solução; o `nproc` da
-    fatia auto-limita o paralelismo interno de testes). Com `set -m`, **cada slot é seu
-    próprio process group** (matável inteiro com `kill -- -pid`). Heartbeat manda
+    fatia auto-limita o paralelismo interno de testes). `SLOT_NODE[i]` guarda o nó de cada
+    slot. **Matar um slot = `_kill_tree`** (colhe a árvore por parentesco com `pgrep -P`,
+    SIGSTOP em todos, colhe de novo, SIGKILL): é o ÚNICO matador — reset/restart, TERM/INT e
+    teto de wall-clock. O `kill -- -pid` do process group (set -m) não alcançava o que rodava
+    sob `timeout` (pgroup próprio) — bug (a). Heartbeat manda
     `{free_slots,total_slots,cfg_hash,status:ok|draining|disabled}` e recebe `assigned` em
-    LOTE (array) + `config` nova quando o admin muda (`moj judges config <host>`); aplicar
-    config/clearcache/GC exige QUIESCÊNCIA (drena todos os slots primeiro — e a drenagem
-    SEMPRE converge, ver tetos abaixo). Precedência de config no BOOT: **servidor (resposta
-    do register boot:true) > estado persistido (`<cache>/../agent-state.json`, gravado a cada
-    apply) > agent.env** — restart nunca diverge (C5 do incidente 2026-07-15). 1 instância
+    LOTE (array) + `config` nova quando o admin muda (`moj judges config <host>`); **o lote
+    que veio no MESMO beat da config é despachado** (`_beat_dispatch`; bug (b): era descartado
+    e ficava em assigned/ até o ASSIGN_TTL) e a drenagem começa no beat seguinte; **config
+    igual à aplicada com hash novo é adotada sem drenar** (`_config_adopt` — o servidor hasheia
+    só partition/reserve/disabled). Aplicar config/clearcache/GC exige QUIESCÊNCIA (drena
+    todos os slots primeiro — e a drenagem SEMPRE converge, ver tetos abaixo). Precedência de
+    config no BOOT: **servidor (resposta do register boot:true) > estado persistido
+    (`<cache>/../agent-state.json`, gravado a cada apply) > agent.env** — restart nunca diverge
+    (C5 do incidente 2026-07-15). **Nenhum slot chama `register`** (pinado, mediria `nproc` =
+    tamanho do slot e o INVHASH ficaria só na cópia dele — bug (c)): o slot deixa o flag
+    `AGENT_WORK/.reregister` (`_request_register`) e o laço registra; as specs (`AGENT_SPECS`)
+    são medidas UMA vez no boot. 1 instância
     por host (duas capabilities na mesma máquina teriam cpusets sobrepostos — não particione
     nesse caso). Modo ROOT força 1 slot (cset/cgroup do cage-run são globais).
+    Teste: `test/agent.sh` (`make test`; sysfs FALSO via `AGENT_SYSFS`).
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports, o
     campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
     via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;
@@ -32,8 +45,10 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     wall-clock tem de acompanhar, senão mataria job legítimo).
   - **ANTI-WEDGE (lições do incidente 2026-07-15)**: (1) **teto de wall-clock DINÂMICO** por
     julgamento (`_job_cap`: TL×testes×2 + compile + folga) e por calibração (`_calib_cap`:
-    CALIBRATIONTL×testes×soluções×2 + folga), aplicado com `timeout` que mata o GRUPO —
-    job preso reporta Judge Error/calib-fail e libera o slot sozinho; (2) **calibra 1× por
+    CALIBRATIONTL×testes×soluções×2 + folga), imposto pelo LAÇO (`_reap_slots`): o slot grava
+    o prazo da fase em `$TMPDIR/.deadline` (`_slot_deadline`, antes do build-and-test e do
+    calibreitor) e o laço faz `_kill_tree` + `_report_slot_killed` quando passa — job preso
+    reporta Judge Error/calib-fail e libera o slot sozinho, sem `timeout(1)`; (2) **calibra 1× por
     máquina**: `ensure_cached` dedupa sob o flock por-problema INCLUSIVE full — pula se uma
     full do MESMO checksum completou enquanto esperava o lock OU se o PEDIDO (`req_epoch` =
     requested_at/at, 4º arg) é mais velho que ela; checksum novo sempre recalibra — todos os

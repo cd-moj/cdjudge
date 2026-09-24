@@ -24,9 +24,13 @@ mkdir -p "$JUDGE_CACHE" 2>/dev/null
 
 # Tetos de WALL-CLOCK por fase (anti-wedge; lição do incidente 2026-07-15): o teto é DINÂMICO —
 # proporcional ao TL-por-teste × nº de testes (× soluções na calibração), com margem p/ compilação
-# e reruns de TLE — e o `timeout` (que mata o GRUPO de processos: bwrap/time/compilador juntos)
-# envolve o build-and-test/calibreitor DENTRO do slot. Fallback fixo só quando o pacote não dá
-# p/ estimar. AGENT_LOCK_WAIT limita a espera no flock por-problema (fila atrás de calibração).
+# e reruns de TLE. QUEM IMPÕE é o laço principal (`_reap_slots`): o subshell do slot grava o
+# epoch-limite da fase corrente em `$TMPDIR/.deadline` (`_slot_deadline`) e o laço mata a ÁRVORE
+# inteira (`_kill_tree`) e reporta Judge Error/calib-fail quando passa. Antes era um `timeout`
+# em volta do build-and-test/calibreitor — e o `timeout` abre um GRUPO de processos próprio, que
+# o `kill -- -pgid` do reset/restart NÃO alcançava: o job "morto" seguia rodando nas CPUs que o
+# slot seguinte recebia (24/09/2026). Fallback fixo só quando o pacote não dá p/ estimar.
+# AGENT_LOCK_WAIT limita a espera no flock por-problema (fila atrás de calibração).
 : "${AGENT_HARD_TL_FALLBACK:=1800}"
 : "${AGENT_LOCK_WAIT:=3600}"
 # Config de partição APLICADA persiste aqui (P6): um restart re-adota exatamente o que rodava
@@ -300,22 +304,25 @@ ensure_cached() {
       # calibra (gera tl.$AGENT_HOST) e reporta. full=1 (Calibrar explícito) roda TODAS as soluções
       # (good/pass/slow/wrong) p/ o log mostrar o comportamento de cada uma; senão só as good
       # (rápido, sob demanda). Robusto a toolchain ausente (pula a linguagem, não aborta).
-      # TETO DE WALL-CLOCK dinâmico + kill do GRUPO (timeout vira líder de pgroup e sinaliza o
-      # grupo inteiro: calibreitor+build-and-test+bwrap+solução) — calibração presa nunca mais
-      # segura um slot p/ sempre (incidente 2026-07-15).
+      # TETO DE WALL-CLOCK dinâmico: o laço principal mata a ÁRVORE (calibreitor+build-and-test+
+      # bwrap+solução) quando o `.deadline` do slot passa — calibração presa nunca mais segura um
+      # slot p/ sempre (incidente 2026-07-15). Sem `timeout`: ele abria um pgroup próprio que o
+      # reset não alcançava (ver o cabeçalho).
       local _ccap _crc
       _ccap="$(_calib_cap "$cdir/pkg" "$full")"
+      _slot_deadline "$_ccap"
       if [[ "$full" == 1 ]]; then
-        MOJ_PROBLEM_ID="$id" timeout -k 10 "$_ccap" \
+        MOJ_PROBLEM_ID="$id" \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       else
-        MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 timeout -k 10 "$_ccap" \
+        MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       fi
       _crc=$?
-      (( _crc == 124 || _crc == 137 )) && {
-        echo "### calibração MORTA pelo teto de wall-clock (${_ccap}s) — job preso/infra" >> "$cdir/.calib.log"
-        alog "calibração de $id MORTA no teto de ${_ccap}s"; }
+      _slot_deadline_clear
+      (( _crc == 137 )) && {
+        echo "### calibração MORTA por sinal (rc=137) — job preso/infra ou teto de wall-clock (${_ccap}s)" >> "$cdir/.calib.log"
+        alog "calibração de $id morta por sinal (teto ${_ccap}s)"; }
       [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
       rm -f "$cdir/tl.$AGENT_HOST"   # stub de checksum antigo (se havia) não vale mais
       report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
@@ -425,7 +432,10 @@ register() {  # [boot=1] — boot:true faz o servidor RE-ENFILEIRAR o que estava
   # host (restart devolve o trabalho em voo NA HORA, sem esperar TTL) e devolver a config vigente
   # (adotada antes do 1º heartbeat). REG_RESP guarda a resposta p/ o boot ler.
   local boot="${1:-0}" specs problems langs body
-  specs="$(agent_specs_json)"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
+  # specs (ncpu/mem/gpu) medidas UMA vez no processo principal (AGENT_SPECS, no boot): um register
+  # disparado de dentro de um slot PINADO via `nproc` ⇒ `ncpu` = tamanho do slot (bug (c)) —
+  # hoje nenhum subshell registra (ver _request_register), e o cache fecha a porta de vez.
+  specs="${AGENT_SPECS:-$(agent_specs_json)}"; problems="$(agent_problems_json)"; langs="$(agent_langs_json)"
   # versões do toolchain medidas DENTRO da jaula (cacheadas; ver inventory.sh) — o servidor
   # publica isso na "info sheet" da prova
   local toolchain; toolchain="$(agent_toolchain_json "$langs")"; [[ -n "$toolchain" ]] || toolchain='{}'
@@ -511,20 +521,19 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   local out wb verdict jcap jrc
   # MOJ_PROBLEM_ID: id real do problema p/ o report (o pacote no cache é <id>/pkg) + ativa a
   # coleta do toolchain no build-and-test (só p/ submissão real, não na calibração).
-  # TETO DE WALL-CLOCK dinâmico (TL×testes×2 + compile + folga) com kill do GRUPO: um job
-  # preso em infra/sandbox morre sozinho e o slot reporta Judge Error — nunca entope o juiz.
+  # TETO DE WALL-CLOCK dinâmico (TL×testes×2 + compile + folga): o laço principal mata a árvore
+  # e reporta Judge Error quando o `.deadline` passa — um job preso em infra/sandbox morre
+  # sozinho e nunca entope o juiz (e o reset alcança tudo: sem `timeout`, sem pgroup à parte).
   jcap="$(_job_cap "$pkg" "$lang")"
+  _slot_deadline "$jcap"
   # stderr do b-a-t em ARQUIVO (era /dev/null): quando ele morre por sinal, a única pista do
   # motivo é essa — a Maratona 29/08 custou uma manhã de forense por causa do descarte.
-  out="$(MOJ_PROBLEM_ID="$problem" timeout -k 10 "$jcap" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
+  out="$(MOJ_PROBLEM_ID="$problem" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
   jrc=$?
+  _slot_deadline_clear
   wb="$(printf '%s\n' "$out" | head -n1)"
   verdict="$(printf '%s\n' "$out" | tail -n1)"
   local batdead=0
-  if (( jrc == 124 || jrc == 137 )); then
-    verdict="Judge Error (teto de wall-clock do job: ${jcap}s)"
-    alog "job id=$id MORTO no teto de ${jcap}s (problema $problem)"
-  fi
   # b-a-t morto NO MEIO (Maratona 29/08: stderr de 79 MB/teste do time entrava inteiro no
   # run-trace.log via LOG "$(<f)" e o ulimit -f matava o próprio harness com SIGXFSZ): a
   # saída para na 1ª linha e o tail -n1 devolvia o CAMINHO DO WORKDIR como "veredicto" — o
@@ -545,7 +554,7 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   # canônico p/ casar o auto-veredicto (fallback: tira o sufixo ,Np do verdict); score do report.env
   # (corrige subtarefas, onde o regex [0-9]+p$ falhava) com fallback p/ o regex no FINALRESP.
   vcanon="${VERDICT_CANON:-${verdict%%,*}}"
-  (( jrc == 124 || jrc == 137 || batdead )) && vcanon="Judge Error"   # canônico limpo p/ o daemon segurar
+  (( jrc == 137 || batdead )) && vcanon="Judge Error"   # canônico limpo p/ o daemon segurar
   score="${SCORE:-$(printf '%s' "$FINALRESP" | grep -oE '[0-9]+p$' | tr -d p)}"
   [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
   smax="${SCORE_MAX:-100}"; [[ "$smax" =~ ^[0-9]+$ ]] || smax=100
@@ -623,7 +632,7 @@ run_update() {  # $1 = request JSON  $2 = cpuset do slot ("" = sem pin)  (bg; PO
   _api_file /judge/update-report "$urbody" >/dev/null \
     && alog "report enviado reqid=$reqid kind=$kind ok=$okj" || alog "FALHA report reqid=$reqid"
   rm -f "$logf" "$lb64" "$urbody"
-  register   # re-registra o inventário atualizado (e volta a free)
+  _request_register   # inventário mudou: o LAÇO PRINCIPAL re-registra (nunca daqui, pinado — bug (c))
 }
 
 # comando por-host vindo do admin (heartbeat). clearcache é EXCLUSIVO (o loop só o executa
@@ -661,8 +670,10 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}  $2 = cpuset do slot (
 : "${AGENT_PARTITION:=off}"
 : "${AGENT_RESERVE:=0}"
 # SLOT_TMP  = TMPDIR do job em voo (removido no reap); SLOT_KIND/SLOT_META = o que roda no slot
-# (job|update|command + JSON mínimo SEM code_b64) p/ reportar ao servidor se o job for MORTO.
-declare -a SLOT_CPUS=() SLOT_PID=() SLOT_TMP=() SLOT_KIND=() SLOT_META=()
+# (job|update|command + JSON mínimo SEM code_b64) p/ reportar ao servidor se o job for MORTO;
+# SLOT_NODE = nó NUMA do slot ("" = sem topologia/sem pin).
+declare -a SLOT_CPUS=() SLOT_PID=() SLOT_TMP=() SLOT_KIND=() SLOT_META=() SLOT_NODE=()
+: "${AGENT_SYSFS:=/sys}"   # raiz do sysfs (o teste do agente aponta p/ uma árvore FALSA)
 CFG_PARTITION="$AGENT_PARTITION" CFG_RESERVE="$AGENT_RESERVE" CFG_DISABLED=false
 AGENT_CFG_HASH=""    # hash da config aplicada (o servidor reenvia quando muda)
 PENDING_CFG=""       # config nova aguardando DRENAGEM dos slots p/ aplicar
@@ -700,43 +711,66 @@ _cpus_expand() {  # "0-3,8,10-11" -> "0 1 2 3 8 10 11"
   printf '%s ' "${out[@]}"
 }
 
-# build_slots <partition> <reserve> -> popula SLOT_CPUS/SLOT_PID. off = 1 slot sem pin.
+# _node_cpulists -> "nó<TAB>cpulist" por nó NUMA (ordem numérica); vazio se o sysfs não expõe nós.
+_node_cpulists() {
+  local n
+  for n in "$AGENT_SYSFS"/devices/system/node/node[0-9]*; do
+    [[ -f "$n/cpulist" ]] || continue
+    printf '%s\t%s\n' "${n##*node}" "$(<"$n/cpulist")"
+  done | sort -t$'\t' -k1,1n
+}
+
+# build_slots <partition> <reserve> -> popula SLOT_CPUS/SLOT_NODE/SLOT_PID. off = 1 slot sem pin.
+# `cpus:X` fatia POR NÓ NUMA (bug (e), 24/09/2026): a fatia antiga seguia a ordem numérica das
+# CPUs, e com uma topologia `0-13,28-41 | 14-27,42-55` um slot de 4 cruzava nós (memória remota
+# num slot, local no vizinho: TL diferente p/ o mesmo código). O resto (< X cpus) de CADA nó
+# fica fora dos slots — fatias uniformes p/ timing consistente.
 build_slots() {
   local mode="${1:-off}" reserve="${2:-0}"
   [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=0
-  SLOT_CPUS=(); SLOT_PID=(); SLOT_TMP=(); SLOT_KIND=(); SLOT_META=()
+  SLOT_CPUS=(); SLOT_NODE=(); SLOT_PID=(); SLOT_TMP=(); SLOT_KIND=(); SLOT_META=()
   case "$mode" in
     numa)
-      local n cl cpus
-      for n in /sys/devices/system/node/node[0-9]*; do
-        [[ -f "$n/cpulist" ]] || continue
+      local node cl cpus
+      while IFS=$'\t' read -r node cl; do
+        [[ -n "$cl" ]] || continue
         # reserve tira as N primeiras cpus DO HOST (só afeta o node que as contém)
-        read -ra cpus <<<"$(_cpus_expand "$(<"$n/cpulist")")"
+        read -ra cpus <<<"$(_cpus_expand "$cl")"
         local kept=() c
         for c in "${cpus[@]}"; do (( c >= reserve )) && kept+=("$c"); done
-        (( ${#kept[@]} > 0 )) && { SLOT_CPUS+=("$(IFS=,; echo "${kept[*]}")"); SLOT_PID+=(0); }
-      done
+        (( ${#kept[@]} > 0 )) && { SLOT_CPUS+=("$(IFS=,; echo "${kept[*]}")"); SLOT_NODE+=("$node"); SLOT_PID+=(0); }
+      done < <(_node_cpulists)
       ;;
     cpus:*)
-      local X="${mode#cpus:}" all=() c i=0 chunk=()
+      local X="${mode#cpus:}" c node cl nodes
       [[ "$X" =~ ^[0-9]+$ && "$X" -ge 1 ]] || { alog "partition '$mode' inválida — usando off"; X=0; }
       if (( X >= 1 )); then
-        read -ra all <<<"$(_cpus_expand "$(</sys/devices/system/cpu/online)")"
-        for c in "${all[@]}"; do
-          (( c < reserve )) && continue
-          chunk+=("$c")
-          if (( ${#chunk[@]} == X )); then SLOT_CPUS+=("$(IFS=,; echo "${chunk[*]}")"); SLOT_PID+=(0); chunk=(); fi
-        done
-        # resto (< X cpus) fica FORA dos slots (fatias uniformes p/ timing consistente)
+        local -A ON=()
+        for c in $(_cpus_expand "$(<"$AGENT_SYSFS/devices/system/cpu/online")"); do ON[$c]=1; done
+        nodes="$(_node_cpulists)"
+        # sem topologia (VM mínima): um pseudo-nó "-" (vira "") com todas as cpus online
+        [[ -n "$nodes" ]] || nodes="$(printf -- '-\t%s' "$(<"$AGENT_SYSFS/devices/system/cpu/online")")"
+        while IFS=$'\t' read -r node cl; do
+          [[ "$node" == - ]] && node=""
+          local chunk=()
+          for c in $(_cpus_expand "$cl"); do
+            [[ -n "${ON[$c]:-}" ]] || continue     # cpu offline não entra em slot
+            (( c < reserve )) && continue
+            chunk+=("$c")
+            if (( ${#chunk[@]} == X )); then
+              SLOT_CPUS+=("$(IFS=,; echo "${chunk[*]}")"); SLOT_NODE+=("$node"); SLOT_PID+=(0); chunk=()
+            fi
+          done
+        done <<<"$nodes"
       fi
       ;;
   esac
-  if (( ${#SLOT_CPUS[@]} == 0 )); then SLOT_CPUS=(""); SLOT_PID=(0); fi   # off/fallback: 1 slot, sem pin
+  if (( ${#SLOT_CPUS[@]} == 0 )); then SLOT_CPUS=(""); SLOT_NODE=(""); SLOT_PID=(0); fi   # off/fallback: 1 slot, sem pin
   # modo ROOT é single-slot only: cset/cgroup do cage-run são estado GLOBAL da máquina
   # (ver mojtools/SANDBOX.md) — multi-slot como root compartilharia shield/limites entre jobs.
   if (( EUID == 0 )) && (( ${#SLOT_CPUS[@]} > 1 )); then
     alog "ATENÇÃO: agente como ROOT com ${#SLOT_CPUS[@]} slots — modo root é single-slot only; FORÇANDO 1 slot"
-    SLOT_CPUS=(""); SLOT_PID=(0); SLOT_TMP=(); SLOT_KIND=(); SLOT_META=()
+    SLOT_CPUS=(""); SLOT_NODE=(""); SLOT_PID=(0); SLOT_TMP=(); SLOT_KIND=(); SLOT_META=()
   fi
   N_SLOTS=${#SLOT_CPUS[@]}
   alog "slots: $N_SLOTS (partition=$mode reserve=$reserve)$( ((N_SLOTS>1)) && printf ' cpusets: %s' "${SLOT_CPUS[*]}" )"
@@ -774,14 +808,51 @@ _report_slot_killed() {
   SLOT_KIND[i]=""; SLOT_META[i]=""
 }
 
-# agent_slots_kill <motivo> : SIGKILL no GRUPO de processos de cada slot ocupado (job inteiro:
-# build-and-test+bwrap+solução), reporta ao servidor e limpa o TMPDIR do job. É a ferramenta
-# de recuperação do `moj judges reset` — o que faltou no incidente 2026-07-15.
+# _tree_pids <pid> : ecoa <pid> + TODOS os descendentes (uma linha), atravessando grupos de
+# processos e sessões — por parentesco (pgrep -P), não por pgid.
+_tree_pids() {
+  local all=" $1 " frontier="$1" next p k
+  while [[ -n "$frontier" ]]; do
+    next=""
+    for p in $frontier; do
+      for k in $(pgrep -P "$p" 2>/dev/null || ps -o pid= --ppid "$p" 2>/dev/null); do
+        [[ "$all" == *" $k "* ]] || { all+="$k "; next+="$k "; }
+      done
+    done
+    frontier="$next"
+  done
+  printf '%s' "${all# }"
+}
+# _kill_tree <pid> : mata a ÁRVORE sob <pid> (ele incluso). ÚNICO matador do agente — usado pelo
+# reset/restart, pelo TERM/INT e pelo teto de wall-clock. O `kill -- -pgid` de antes não alcançava
+# o que rodava sob `timeout` (ele abre um pgroup próprio p/ poder matar o comando junto): um job
+# "morto" pelo reset seguia com build-and-test+bwrap+solução vivos nas CPUs que o slot seguinte
+# recebia (bug (a), 24/09/2026). Receita: colhe a árvore, SIGSTOP em todos (ninguém forka no meio),
+# colhe DE NOVO (filho nascido entre a colheita e o STOP), STOP neles, SIGKILL em tudo; o pgroup
+# do slot leva KILL também (cinto e suspensório). A jaula (bwrap --die-with-parent + pid
+# namespace) vai junto com o bwrap.
+_kill_tree() {
+  local root="$1" pids
+  pids="$(_tree_pids "$root")"
+  # shellcheck disable=SC2086
+  kill -STOP $pids 2>/dev/null
+  pids="$(_tree_pids "$root")"
+  # shellcheck disable=SC2086
+  kill -STOP $pids 2>/dev/null
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null
+  kill -KILL -- "-$root" 2>/dev/null
+  return 0
+}
+
+# agent_slots_kill <motivo> : mata a árvore de cada slot ocupado (job inteiro: build-and-test+
+# bwrap+solução), reporta ao servidor e limpa o TMPDIR do job. É a ferramenta de recuperação do
+# `moj judges reset` — o que faltou no incidente 2026-07-15.
 agent_slots_kill() {
   local why="${1:-morto pelo agente}" i pid n=0
   for i in "${!SLOT_PID[@]}"; do
     pid="${SLOT_PID[i]:-0}"; (( pid != 0 )) || continue
-    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    _kill_tree "$pid"
     _report_slot_killed "$i" "$why"
     SLOT_PID[i]=0
     [[ -n "${SLOT_TMP[i]:-}" ]] && rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
@@ -791,9 +862,141 @@ agent_slots_kill() {
   return 0
 }
 
+# ---- teto de wall-clock: o canal entre o subshell do slot e o laço principal ----------------
+# _slot_deadline <secs> : grava em $TMPDIR/.deadline "<epoch-limite> <cap>" p/ a fase que começa
+# agora (chamado DENTRO do slot, antes do build-and-test e antes do calibreitor);
+# _slot_deadline_clear : a fase acabou. Sem TMPDIR (rodando fora de um slot) não faz nada.
+_slot_deadline() {
+  [[ -n "${TMPDIR:-}" && -d "${TMPDIR:-}" && "$1" =~ ^[0-9]+$ ]] || return 0
+  printf '%s %s\n' "$(( EPOCHSECONDS + $1 ))" "$1" > "$TMPDIR/.deadline.tmp" 2>/dev/null \
+    && mv -f "$TMPDIR/.deadline.tmp" "$TMPDIR/.deadline" 2>/dev/null
+  return 0
+}
+_slot_deadline_clear() { [[ -n "${TMPDIR:-}" ]] && rm -f "$TMPDIR/.deadline" 2>/dev/null; return 0; }
+
+# ---- re-registro pedido por um slot (nunca registrar de DENTRO do slot: bug (c)) ------------
+# O subshell pinado que chamava `register` media `nproc` = tamanho do slot (ncpu errado no
+# registry) e atualizava INVHASH só na cópia dele — o laço seguia mandando o hash velho e o
+# servidor pedia reregister a cada beat. Agora o slot deixa um FLAG e o laço principal registra.
+_request_register() { : > "$AGENT_WORK/.reregister" 2>/dev/null; return 0; }
+_pending_register() {
+  [[ -e "$AGENT_WORK/.reregister" ]] || return 0
+  rm -f "$AGENT_WORK/.reregister" 2>/dev/null
+  register
+}
+
 # ----------------------------------------------------------------- loop principal
 # _free_slot -> ecoa o índice do primeiro slot livre (rc 1 se nenhum)
 _free_slot() { local i; for i in "${!SLOT_PID[@]}"; do (( SLOT_PID[i] == 0 )) && { echo "$i"; return 0; }; done; return 1; }
+
+# _reap_slots : colhe os slots que terminaram (+ limpeza do TMPDIR) e IMPÕE o teto de wall-clock
+# (`$TMPDIR/.deadline` vencido ⇒ _kill_tree + report ao servidor). Deixa em FREE o nº de livres.
+_reap_slots() {
+  local i pid dl cap
+  FREE=0
+  for i in "${!SLOT_PID[@]}"; do
+    pid="${SLOT_PID[i]:-0}"
+    if (( pid != 0 )) && ! kill -0 "$pid" 2>/dev/null; then
+      SLOT_PID[i]=0; SLOT_KIND[i]=""; SLOT_META[i]=""
+      [[ -n "${SLOT_TMP[i]:-}" ]] && rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
+    elif (( pid != 0 )) && [[ -n "${SLOT_TMP[i]:-}" && -s "${SLOT_TMP[i]}/.deadline" ]]; then
+      dl=""; cap=""; read -r dl cap < "${SLOT_TMP[i]}/.deadline" 2>/dev/null || :   # sem \n final o read dá rc 1 mas ATRIBUI
+      if [[ "$dl" =~ ^[0-9]+$ ]] && (( EPOCHSECONDS > dl )); then
+        alog "slot $i MORTO no teto de wall-clock (${cap:-?}s): $(jq -r '.id // .reqid // .target // "?"' <<<"${SLOT_META[i]:-null}" 2>/dev/null)"
+        _kill_tree "$pid"
+        _report_slot_killed "$i" "teto de wall-clock: ${cap:-?}s"
+        SLOT_PID[i]=0
+        rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
+      fi
+    fi
+    (( SLOT_PID[i] == 0 )) && FREE=$((FREE+1))
+  done
+  return 0
+}
+
+# _config_adopt <config-json> : config nova do servidor. Se ela é a MESMA que já está aplicada
+# (partition/reserve/disabled iguais; só o hash mudou — ex.: o servidor passou a hashear só os
+# três campos, ou o admin salvou a entrada sem mudar nada), adota o hash NA HORA, sem drenar.
+# Diferente ⇒ agenda (PENDING_CFG) e drena, como sempre.
+_config_adopt() {
+  local cfg="$1" p r d h
+  IFS=$'\x01' read -r p r d h < <(jq -j '[(.partition // "off"), ((.reserve // 0)|tostring),
+      ((.disabled // false)|tostring), (.cfg_hash // "")] | join("\u0001")' <<<"$cfg" 2>/dev/null)
+  local cur_d=false; [[ "$CFG_DISABLED" == true ]] && cur_d=true
+  if [[ "$p" == "$CFG_PARTITION" && "$r" == "${CFG_RESERVE:-0}" && "$d" == "$cur_d" ]]; then
+    AGENT_CFG_HASH="$h"; _save_state
+    alog "config do servidor igual à aplicada (hash $h) — adotada sem drenar"
+    return 0
+  fi
+  PENDING_CFG="$cfg"
+  alog "config nova do servidor ($(jq -c 'del(.cfg_hash)' <<<"$cfg" 2>/dev/null)) — drenando slots p/ aplicar"
+}
+
+# _beat_dispatch <resp> : trata a resposta de UM heartbeat (comando urgente, config, comando,
+# update, lote de jobs). CLAIMABLE (global, calculado ANTES do beat) diz quantos slots o servidor
+# pôde preencher — e o que ele reivindicou É DESPACHADO mesmo que o beat tenha trazido `config`
+# (bug (b), 24/09/2026: o `[[ -z $PENDING_CFG ]]` de antes descartava o lote; os jobs ficavam em
+# assigned/ até o ASSIGN_TTL de 900 s). A drenagem começa no beat SEGUINTE (CLAIMABLE=0).
+_beat_dispatch() {
+  local resp="$1" cmd cfg upd jobs job i jt uact
+  [[ "$(jq -r '.reregister // false' <<<"$resp" 2>/dev/null)" == true ]] && register
+  cmd="$(jq -c '.command // empty' <<<"$resp" 2>/dev/null)"
+  # comando URGENTE (kill/restart): o servidor o entrega MESMO ocupado/drenando — é a
+  # recuperação sem SSH (`moj judges reset/restart`) que faltou no incidente 2026-07-15.
+  if [[ -n "$cmd" && "$cmd" != null ]]; then
+    uact="$(jq -r '.action // ""' <<<"$cmd" 2>/dev/null)"
+    case "$uact" in
+      kill)
+        alog "comando URGENTE do admin: kill (reset) — matando todos os slots"
+        agent_slots_kill "morto por 'moj judges reset' (admin)"
+        FREE=$N_SLOTS
+        if [[ -n "$PENDING_CFG" ]]; then apply_config "$PENDING_CFG"; PENDING_CFG=""; fi
+        PENDING_CMD=""; register; cmd=""
+        ;;
+      restart)
+        alog "comando URGENTE do admin: restart — matando slots e re-executando o agente"
+        agent_slots_kill "morto por 'moj judges restart' (admin)"
+        rm -f "$AUTH_CFG"
+        exec bash "$SELF/moj-agent.sh"
+        ;;
+    esac
+  fi
+  # config nova do admin: igual à aplicada ⇒ só o hash; diferente ⇒ agenda e DRENA (aplica
+  # quando todos os slots esvaziarem; com o teto dinâmico + kill, a drenagem SEMPRE converge)
+  cfg="$(jq -c '.config // empty' <<<"$resp" 2>/dev/null)"
+  [[ -n "$cfg" && "$cfg" != null ]] && _config_adopt "$cfg"
+  (( CLAIMABLE > 0 )) || return 0
+  upd="$(jq -c '.update // empty' <<<"$resp" 2>/dev/null)"
+  if [[ -n "$cmd" && "$cmd" != null ]]; then
+    if [[ "$(jq -r '.action // ""' <<<"$cmd")" == clearcache ]]; then
+      PENDING_CMD="$cmd"; alog "clearcache agendado — drenando slots p/ executar"
+    else
+      i="$(_free_slot)" && { jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
+        TMPDIR="$jt" run_command "$cmd" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
+        SLOT_TMP[i]="$jt"; SLOT_KIND[i]=command; SLOT_META[i]=""
+        alog "comando reivindicado $(jq -r '.action // .cmdid' <<<"$cmd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
+    fi
+  elif [[ -n "$upd" && "$upd" != null ]]; then
+    i="$(_free_slot)" && { jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
+      TMPDIR="$jt" run_update "$upd" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
+      SLOT_TMP[i]="$jt"; SLOT_KIND[i]=update
+      SLOT_META[i]="$(jq -c '{reqid,repo,kind,target}' <<<"$upd" 2>/dev/null)"
+      alog "update reivindicado reqid=$(jq -r '.reqid' <<<"$upd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
+  else
+    # LOTE: o servidor devolve assigned como array (até free_slots) ou escalar (legado)
+    jobs="$(jq -c '(.assigned // empty) | if type=="array" then .[] else . end' <<<"$resp" 2>/dev/null)"
+    while IFS= read -r job; do
+      [[ -n "$job" && "$job" != null ]] || continue
+      i="$(_free_slot)" || break
+      jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
+      TMPDIR="$jt" run_job "$job" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
+      SLOT_TMP[i]="$jt"; SLOT_KIND[i]=job
+      SLOT_META[i]="$(jq -c '{id,contest,problem_id,login,lang}' <<<"$job" 2>/dev/null)"
+      alog "job reivindicado id=$(jq -r '.id' <<<"$job" 2>/dev/null) -> slot $i${SLOT_CPUS[i]:+ [cpus ${SLOT_CPUS[i]}]} pid ${SLOT_PID[i]}"
+    done <<<"$jobs"
+  fi
+  return 0
+}
 
 moj_agent_main() {
 # instância ÚNICA por host: um flock evita agentes DUPLICADOS (brigam por jobs e gastam forks).
@@ -812,6 +1015,8 @@ trap 'agent_slots_kill "agente encerrando (TERM/INT)"; exit 143' TERM INT
 ensure_rootfs        # jaula no rootfs reprodutível (não no host)
 # TMPDIR por job: zera a base no boot (nenhum job sobrevive a restart; lixo não acumula)
 rm -rf "$AGENT_WORK" 2>/dev/null; mkdir -p "$AGENT_WORK" 2>/dev/null
+# specs da máquina medidas UMA vez, aqui (processo principal, nunca pinado) — ver register.
+AGENT_SPECS="$(agent_specs_json)"
 # ordem de precedência da config no BOOT (P5/P6): 1) config do SERVIDOR (resposta do register
 # boot:true); 2) estado PERSISTIDO da última aplicada (agent-state.json); 3) agent.env.
 _load_state || true
@@ -832,31 +1037,25 @@ fi
 # relançamento: reenvia os TLs já calibrados (sem recalibrar) — em BACKGROUND: com um cache
 # grande (centenas de problemas) isso leva minutos e segurava o loop (juiz cego p/ jobs/config)
 report_cached_tls 8>&- &
-local free i n state hstatus resp cfg cmd upd jobs job jt uact
+local state hstatus resp
 while true; do
-  # reap por slot + contagem de livres (+ limpeza do TMPDIR do job que terminou)
-  free=0
-  for i in "${!SLOT_PID[@]}"; do
-    if (( SLOT_PID[i] != 0 )) && ! kill -0 "${SLOT_PID[i]}" 2>/dev/null; then
-      SLOT_PID[i]=0; SLOT_KIND[i]=""; SLOT_META[i]=""
-      [[ -n "${SLOT_TMP[i]:-}" ]] && rm -rf "${SLOT_TMP[i]}" 2>/dev/null; SLOT_TMP[i]=""
-    fi
-    (( SLOT_PID[i] == 0 )) && free=$((free+1))
-  done
+  # reap por slot + teto de wall-clock + contagem de livres (FREE)
+  _reap_slots
+  _pending_register   # um slot pediu re-registro (inventário mudou) — quem registra é o laço
 
   # DRENADO (todos livres): aplica config pendente, executa comando exclusivo, roda o GC
-  if (( free == N_SLOTS )); then
+  if (( FREE == N_SLOTS )); then
     if [[ -n "$PENDING_CMD" ]]; then run_command "$PENDING_CMD"; PENDING_CMD=""; fi
     if [[ -n "$PENDING_CFG" ]]; then apply_config "$PENDING_CFG"; PENDING_CFG=""
-      free=$N_SLOTS   # slots recém-reconstruídos, todos livres
+      FREE=$N_SLOTS   # slots recém-reconstruídos, todos livres
     fi
     [[ -z "$PENDING_CMD" && -z "$PENDING_CFG" ]] && gc_cache
   fi
 
   # enquanto drena (config/comando pendente) ou desabilitado: não reivindica (free_slots=0)
-  local claimable=$free
-  { [[ -n "$PENDING_CFG" || -n "$PENDING_CMD" || "$CFG_DISABLED" == true ]]; } && claimable=0
-  state=busy; (( claimable > 0 )) && state=free
+  CLAIMABLE=$FREE
+  { [[ -n "$PENDING_CFG" || -n "$PENDING_CMD" || "$CFG_DISABLED" == true ]]; } && CLAIMABLE=0
+  state=busy; (( CLAIMABLE > 0 )) && state=free
   # status HONESTO: o servidor/UI distinguem "drenando/desabilitado" de "rodando job" —
   # antes ambos eram só state=busy e viravam o "unknown_busy" indecifrável do incidente.
   hstatus=ok
@@ -865,70 +1064,9 @@ while true; do
 
   resp="$(_api /judge/heartbeat \
     "$(jq -cn --arg h "$AGENT_HOST" --arg s "$state" --arg ih "$INVHASH" --arg ch "$AGENT_CFG_HASH" \
-       --argjson fs "$claimable" --argjson ts "$N_SLOTS" --arg st "$hstatus" \
+       --argjson fs "$CLAIMABLE" --argjson ts "$N_SLOTS" --arg st "$hstatus" \
        '{host:$h, state:$s, inv_hash:$ih, cfg_hash:$ch, free_slots:$fs, total_slots:$ts, status:$st}')")"
-  if [[ -n "$resp" ]]; then
-    [[ "$(jq -r '.reregister // false' <<<"$resp" 2>/dev/null)" == true ]] && register
-    cmd="$(jq -c '.command // empty' <<<"$resp" 2>/dev/null)"
-    # comando URGENTE (kill/restart): o servidor o entrega MESMO ocupado/drenando — é a
-    # recuperação sem SSH (`moj judges reset/restart`) que faltou no incidente 2026-07-15.
-    if [[ -n "$cmd" && "$cmd" != null ]]; then
-      uact="$(jq -r '.action // ""' <<<"$cmd" 2>/dev/null)"
-      case "$uact" in
-        kill)
-          alog "comando URGENTE do admin: kill (reset) — matando todos os slots"
-          agent_slots_kill "morto por 'moj judges reset' (admin)"
-          free=$N_SLOTS
-          if [[ -n "$PENDING_CFG" ]]; then apply_config "$PENDING_CFG"; PENDING_CFG=""; fi
-          PENDING_CMD=""; register; cmd=""
-          ;;
-        restart)
-          alog "comando URGENTE do admin: restart — matando slots e re-executando o agente"
-          agent_slots_kill "morto por 'moj judges restart' (admin)"
-          rm -f "$AUTH_CFG"
-          exec bash "$SELF/moj-agent.sh"
-          ;;
-      esac
-    fi
-    # config nova do admin: agenda e DRENA (aplica quando todos os slots esvaziarem; com o teto
-    # dinâmico + kill, a drenagem SEMPRE converge — não existe mais drain eterno)
-    cfg="$(jq -c '.config // empty' <<<"$resp" 2>/dev/null)"
-    if [[ -n "$cfg" && "$cfg" != null ]]; then
-      PENDING_CFG="$cfg"
-      alog "config nova do servidor ($(jq -c 'del(.cfg_hash)' <<<"$cfg" 2>/dev/null)) — drenando slots p/ aplicar"
-    fi
-    if (( claimable > 0 )) && [[ -z "$PENDING_CFG" ]]; then
-      upd="$(jq -c '.update // empty' <<<"$resp" 2>/dev/null)"
-      if [[ -n "$cmd" && "$cmd" != null ]]; then
-        if [[ "$(jq -r '.action // ""' <<<"$cmd")" == clearcache ]]; then
-          PENDING_CMD="$cmd"; alog "clearcache agendado — drenando slots p/ executar"
-        else
-          i="$(_free_slot)" && { jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
-            TMPDIR="$jt" run_command "$cmd" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
-            SLOT_TMP[i]="$jt"; SLOT_KIND[i]=command; SLOT_META[i]=""
-            alog "comando reivindicado $(jq -r '.action // .cmdid' <<<"$cmd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
-        fi
-      elif [[ -n "$upd" && "$upd" != null ]]; then
-        i="$(_free_slot)" && { jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
-          TMPDIR="$jt" run_update "$upd" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
-          SLOT_TMP[i]="$jt"; SLOT_KIND[i]=update
-          SLOT_META[i]="$(jq -c '{reqid,repo,kind,target}' <<<"$upd" 2>/dev/null)"
-          alog "update reivindicado reqid=$(jq -r '.reqid' <<<"$upd" 2>/dev/null) -> slot $i pid ${SLOT_PID[i]}"; }
-      else
-        # LOTE: o servidor devolve assigned como array (até free_slots) ou escalar (legado)
-        jobs="$(jq -c '(.assigned // empty) | if type=="array" then .[] else . end' <<<"$resp" 2>/dev/null)"
-        while IFS= read -r job; do
-          [[ -n "$job" && "$job" != null ]] || continue
-          i="$(_free_slot)" || break
-          jt="$AGENT_WORK/s$i.$EPOCHSECONDS.$RANDOM"; mkdir -p "$jt"
-          TMPDIR="$jt" run_job "$job" "${SLOT_CPUS[i]}" 8>&- & SLOT_PID[i]=$!
-          SLOT_TMP[i]="$jt"; SLOT_KIND[i]=job
-          SLOT_META[i]="$(jq -c '{id,contest,problem_id,login,lang}' <<<"$job" 2>/dev/null)"
-          alog "job reivindicado id=$(jq -r '.id' <<<"$job" 2>/dev/null) -> slot $i${SLOT_CPUS[i]:+ [cpus ${SLOT_CPUS[i]}]} pid ${SLOT_PID[i]}"
-        done <<<"$jobs"
-      fi
-    fi
-  fi
+  [[ -n "$resp" ]] && _beat_dispatch "$resp"
   sleep "$HEARTBEAT_SECS"
 done
 }

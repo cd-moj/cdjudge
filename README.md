@@ -131,15 +131,24 @@ do servidor adotada no boot) — restart nunca mais wedgeia por config divergent
   sobe um novo desacoplado (`setsid`, flock). `RUN_AGENT_FORCE_MANUAL=1` força o manual.
 - **manual (teste):** `set -a; . etc/agent.env; set +a; bash agent/moj-agent.sh`.
 
-**Tetos de wall-clock (anti-wedge):** todo julgamento/calibração roda sob um `timeout` que mata o
-**grupo de processos** ao estourar um teto **DINÂMICO** — proporcional ao TL-por-teste × nº de
-testes (× soluções na calibração), ×2 p/ reruns de TLE, + compilação + folga (piso 300s). Um job
-preso em infra reporta `Judge Error`/falha de calibração e libera o slot sozinho — a fila nunca
-mais congela como no incidente 2026-07-15. Knobs: `AGENT_HARD_TL_FALLBACK` (default 1800s; usado
-só quando o pacote não dá p/ estimar) e `AGENT_LOCK_WAIT` (espera máx no flock por-problema,
-default 3600s). O scratch de cada job vive num **TMPDIR próprio** (`AGENT_WORK`, default
-`/tmp/moj-agent-work.<host>/s<slot>.<epoch>.<rand>`) removido no fim — slots nunca compartilham
-diretório de escrita.
+**Tetos de wall-clock (anti-wedge):** todo julgamento/calibração tem um teto **DINÂMICO** —
+proporcional ao TL-por-teste × nº de testes (× soluções na calibração), ×2 p/ reruns de TLE, +
+compilação + folga (piso 300s). O slot grava o prazo da fase corrente em `$TMPDIR/.deadline` e
+quem o impõe é o **laço principal** do agente, que mata a **árvore inteira** do slot
+(`_kill_tree`: por parentesco, atravessando grupos de processos) e reporta `Judge Error`/falha de
+calibração — o slot se libera sozinho e a fila nunca mais congela como no incidente 2026-07-15.
+(Até 24/09/2026 era um `timeout` em volta do build-and-test; o `timeout` abre um grupo de
+processos próprio que o `kill -- -pgid` do `moj judges reset` **não alcançava** — o job "morto"
+seguia rodando nas CPUs que o slot seguinte recebia.) Knobs: `AGENT_HARD_TL_FALLBACK` (default
+1800s; usado só quando o pacote não dá p/ estimar) e `AGENT_LOCK_WAIT` (espera máx no flock
+por-problema, default 3600s). O scratch de cada job vive num **TMPDIR próprio** (`AGENT_WORK`,
+default `/tmp/moj-agent-work.<host>/s<slot>.<epoch>.<rand>`) removido no fim — slots nunca
+compartilham diretório de escrita.
+
+**Teste do agente (sem rede, sem jaula):** `make test` (= `bash test/agent.sh`) exercita as funções
+sourced — fatiamento por nó NUMA, `_kill_tree` contra uma árvore com `timeout`, o teto de wall-clock
+imposto pelo laço, o lote despachado no beat que traz `config`, config igual adotada sem drenar e o
+re-registro pedido por um slot.
 
 ## O cache de pacotes (e como ele se limpa)
 
@@ -189,8 +198,10 @@ root**); **chococino** `/home/prof/ribas/moj-judge`. No C3SL: `--sysroot tar` + 
 ## Multi-slot
 
 A máquina pode ser particionada (`AGENT_PARTITION=off|numa|cpus:N`, `AGENT_RESERVE=N`) p/ corrigir
-N problemas ao mesmo tempo, cada um pinado a um cpuset (`taskset`). A config por-juiz do **servidor**
-(`moj judges config <host>`) chega pelo heartbeat e **vence** o fallback local. Ver `CLAUDE.md`.
+N problemas ao mesmo tempo, cada um pinado a um cpuset (`taskset`). `cpus:N` fatia **dentro de cada
+nó NUMA** (um slot nunca cruza nós; o resto `< N` de cada nó fica fora). A config por-juiz do
+**servidor** (`moj judges config <host>`) chega pelo heartbeat e **vence** o fallback local; config
+igual à aplicada (só o hash mudou) é adotada sem drenar. Ver `CLAUDE.md`.
 
 ## Legado (aposentado)
 
