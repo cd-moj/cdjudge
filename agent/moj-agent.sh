@@ -948,7 +948,9 @@ _slot_take() {
 # anotou: ficaram sem teste) e devolve os slots que SÓ esses grupos usavam. Idempotente (o arquivo
 # é append-only, o mesmo índice pode repetir); o grupo 0 nunca é liberado (é o do rerun/primário).
 _release_tail() {
-  local p="$1" f="${SLOT_TMP[p]:-}/released" g s gs other ok
+  # (dois `local`: numa declaração só o bash expande TODAS as palavras antes de atribuir — o `p` do índice
+  # ainda não existiria e, sob `set -u`, o agente morria a cada volta com job rodando; 28/09/2026)
+  local p="$1"; local f="${SLOT_TMP[p]:-}/released" g s gs other ok
   [[ -n "${SLOT_TMP[p]:-}" && -s "$f" && -n "${SLOT_ALLOC[p]:-}" ]] || return 0
   local -a GS; IFS='|' read -ra GS <<<"${SLOT_ALLOC[p]}"
   while IFS= read -r g; do
@@ -1004,7 +1006,7 @@ apply_config() {
 # job vira Judge Error na hora (q_done imediato) e calibração fecha o pending via
 # update-report ok=false (nada espera ASSIGN_TTL/UPD_TTL).
 _report_slot_killed() {
-  local i="$1" why="$2" kind="${SLOT_KIND[i]:-}" meta="${SLOT_META[i]:-}"
+  local i="$1" why="$2"; local kind="${SLOT_KIND[i]:-}" meta="${SLOT_META[i]:-}"   # (ver _release_tail)
   [[ -n "$meta" ]] || { SLOT_KIND[i]=""; return 0; }
   case "$kind" in
     job)
