@@ -261,5 +261,13 @@ DBG="$(cat "$LOG")"
 ck "não coube ⇒ decline com id e rc 1"         '[[ $rc == 1 ]] && grep -q "api /judge/decline" "$LOG" && grep -q "\"id\":\"j7\"" "$LOG" && grep -q "sem 2 cpu(s) livres" "$LOG"'
 agent_slots_kill teste >/dev/null; for i in "${!SLOT_PID[@]}"; do SLOT_PID[i]=0; done
 
+echo "== local que usa a variável declarada na MESMA linha (28/09/2026: o agente morria com job rodando) =="
+# o bash expande todas as palavras do `local` antes de atribuir: `local p="$1" f="${SLOT_TMP[p]}"` lia um `p`
+# inexistente e, sob `set -u`, matava o agente. Aqui as funções rodam num bash LIMPO (sem p/i globais, que o
+# restante deste teste deixa definidos e escondiam o bug).
+F="$(mktemp)"; sed -n '/^_release_tail() {/,/^}/p; /^_report_slot_killed() {/,/^}/p' "$JD/agent/moj-agent.sh" > "$F"
+out="$(bash -c 'set -u; declare -a SLOT_TMP SLOT_ALLOC SLOT_RELEASED SLOT_KIND SLOT_META; SLOT_TMP[3]=/nao/existe; SLOT_ALLOC[3]="3|4"; SLOT_RELEASED[3]=" "; source "$1"; _release_tail 3 && _report_slot_killed 3 teste && echo ok' _ "$F" 2>&1)"; rm -f "$F"
+DBG="$out"; ck "_release_tail e _report_slot_killed rodam sob set -u sem p/i globais" '[[ "$out" == ok ]]'
+
 echo; echo "RESULT: $pass passed, $fail failed"
 (( fail == 0 ))
