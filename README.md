@@ -180,9 +180,16 @@ Ele **não cresce para sempre**:
   peso: testes, soluções, binários) é apagado, mas o `.moj-cache.json` e o `tl.<host>` **ficam** —
   no próximo uso, se o checksum for o MESMO, o TL é **restaurado sem recalibrar**. Checksum novo
   recalibra, como sempre;
-- `AGENT_CACHE_MAX_MB` (default `0` = sem teto) é o teto opcional de disco, com evicção LRU.
+- `AGENT_CACHE_MAX_MB` (default `0` = sem teto) é o teto opcional de disco, com evicção LRU;
+- problema que **não existe mais** no servidor (apagado ou movido de org) sai inteiro. O servidor
+  avisa com o 404 `problem_gone` no report de TL/log, ou com `exists:false` no `package-meta`. O
+  agente marca a entrada (`.gone`), tira do inventário, para de re-reportá-la a cada boot e a próxima
+  varredura apaga o diretório. Se o problema voltar a existir com o mesmo id, a marca sai no próximo uso.
 
 O sweep respeita o flock por-problema e pula download em curso, então não atropela julgamento.
+
+**Erro de API:** o agente só repete (3×, 2 s entre elas) o que pode passar na próxima tentativa —
+sem resposta, 408, 409 `busy`, 429 e 5xx. Outro 4xx é a resposta definitiva.
 
 **Limpar o cache de um juiz sem SSH:** `moj judges clearcache <host>` (admin). O comando chega
 pelo heartbeat e é **exclusivo**: o agente **drena todos os slots** antes de executar, apaga o

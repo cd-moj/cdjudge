@@ -91,14 +91,30 @@ ensure_rootfs() {
 _HH=(); [[ -n "$MOJ_HOST_HEADER" ]] && _HH=(-H "Host: $MOJ_HOST_HEADER")
 [[ -n "$MOJ_RESOLVE" ]] && _HH+=(--resolve "$MOJ_RESOLVE")
 
-_api() {  # _api <path> <json-body> -> resposta no stdout; resiliente (re-tenta um POST que falhou)
-  local i out                                  # antes: 1 tentativa -> um POST perdido sumia com o TL/log
+# _api_ex <timeout> <path> <args do corpo p/ o curl…> : POST que LÊ o código HTTP — corpo em _API_BODY, código em
+# _API_CODE (000 = sem resposta); rc 0 só em 2xx. Re-tenta (3×, 2 s entre elas) só o que pode passar na próxima:
+# sem resposta, 408, 409 (`busy`: o lock do servidor não veio a tempo), 429 e 5xx. Outro 4xx é a resposta
+# definitiva — antes todo erro era repetido, e o 404 `problem_gone` de cada problema apagado do cache custava 4 s
+# no re-report do boot (26/10/2026). Chame FORA de `$(…)` p/ ler _API_CODE/_API_BODY.
+_api_ex() {
+  local i out
   for i in 1 2 3; do
-    out="$(curl -fsS -m 30 "${_HH[@]}" "${_AUTH[@]}" -H 'Content-Type: application/json' \
-      --data "$2" "$MOJ_API$1" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
-    sleep 2
+    out="$(curl -sS -m "$1" "${_HH[@]}" "${_AUTH[@]}" -H 'Content-Type: application/json' "${@:3}" \
+      -w '\n%{http_code}' "$MOJ_API$2" 2>/dev/null)"
+    _API_CODE="${out##*$'\n'}"; _API_BODY="${out%$'\n'*}"
+    [[ "$_API_CODE" =~ ^[0-9]{3}$ ]] || { _API_CODE=000; _API_BODY=""; }
+    [[ "$_API_CODE" == 2?? ]] && return 0
+    [[ "$_API_CODE" =~ ^(000|408|409|429|5[0-9][0-9])$ ]] || return 1
+    (( i < 3 )) && sleep 2
   done
   return 1
+}
+# _api_gone : o último _api_ex foi o 404 `problem_gone` (o pacote não existe mais no servidor: apagado/movido)?
+_api_gone() {
+  [[ "$_API_CODE" == 404 && "$(jq -r '.error.code // empty' <<<"$_API_BODY" 2>/dev/null)" == problem_gone ]]
+}
+_api() {  # _api <path> <json-body> -> resposta no stdout; resiliente (re-tenta um POST que falhou; ver _api_ex)
+  _api_ex 30 "$1" --data "$2" && printf '%s' "$_API_BODY"
 }
 _api_get() {  # _api_get <path> -> corpo no stdout
   curl -fsS -m 30 "${_HH[@]}" "${_AUTH[@]}" "$MOJ_API$1" 2>/dev/null
@@ -106,13 +122,7 @@ _api_get() {  # _api_get <path> -> corpo no stdout
 _api_file() {  # _api_file <path> <bodyfile> : POST com o corpo vindo de ARQUIVO. Obrigatório p/
   # payloads grandes (report.html em base64): um ÚNICO arg >128KB estoura MAX_ARG_STRLEN
   # ("Argument list too long") e o POST se perdia em silêncio. Re-tenta como o _api.
-  local i
-  for i in 1 2 3; do
-    curl -fsS -m 60 "${_HH[@]}" "${_AUTH[@]}" -H 'Content-Type: application/json' \
-      --data-binary "@$2" "$MOJ_API$1" >/dev/null 2>&1 && return 0
-    sleep 2
-  done
-  return 1
+  _api_ex 60 "$1" --data-binary "@$2"
 }
 _api_get_file() {  # _api_get_file <path> <outfile> -> baixa (rc!=0 em erro)
   curl -fsS -m 180 "${_HH[@]}" "${_AUTH[@]}" -o "$2" "$MOJ_API$1" 2>/dev/null
@@ -121,6 +131,18 @@ _uri() { jq -rn --arg s "$1" '$s|@uri'; }   # url-encode (id tem '#')
 
 # ----------------------------------------------------------------- cache de pacotes
 cache_id_dir() { printf '%s/%s' "$JUDGE_CACHE" "$(printf '%s' "$1" | tr '#/' '__')"; }
+
+# _cache_mark_gone <id> : o servidor disse que o problema não existe mais (404 `problem_gone` num report, ou
+# `exists:false` no package-meta) — marca a entrada do cache com `.gone` (o epoch): o re-report do boot e o
+# inventário a pulam e o GC apaga o diretório. Um arquivo e não um campo do meta: marcar não disputa o meta com
+# o ensure_cached, e ler é um `-e` sem fork. Volta a valer sozinho se o package-meta disser que existe de novo.
+_cache_mark_gone() {
+  local d; d="$(cache_id_dir "$1")"
+  [[ -d "$d" ]] || return 0
+  [[ -e "$d/.gone" ]] || alog "problema $1 não existe mais no servidor — entrada do cache marcada (o GC a apaga)"
+  printf '%s\n' "$EPOCHSECONDS" > "$d/.gone" 2>/dev/null
+  return 0
+}
 
 # tl_to_json <tlfile> [TL|TLKATTIS] -> {lang:val} de um array da tabela. A tabela leva as DUAS metades dos
 # métodos de TL (mojtools tl-methods.sh, 26/10/2026): TL[] = MOJ, TLKATTIS[] = Kattis por linguagem. O
@@ -142,20 +164,25 @@ _tl_has_method() {
 }
 
 # report_tl <id> <checksum> <pkgdir> : reporta ao MOJ o TL calibrado (tl.$AGENT_HOST) — as duas metades.
+# rc 0 = gravado; 3 = o problema não existe mais no servidor (404 `problem_gone`; a entrada do cache fica
+# marcada, ver _cache_mark_gone); 1 = falhou (sem resposta, 5xx depois das tentativas, outro 4xx).
 report_tl() {
   local id="$1" cks="$2" pkg="$3" tlf="$3/tl.$AGENT_HOST" tlj tlk
   [[ -f "$tlf" ]] || tlf="$pkg/tl"
   [[ -f "$tlf" ]] || { alog "report_tl: sem tl p/ $id"; return 1; }
   tlj="$(tl_to_json "$tlf")"; tlk="$(tl_to_json "$tlf" TLKATTIS)"
   [[ -n "$tlj" ]] || tlj='{}'; [[ -n "$tlk" ]] || tlk='{}'
-  _api /judge/tl-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" \
-        --argjson tl "$tlj" --argjson tlk "$tlk" '{host:$h, id:$id, checksum:$c, tl:$tl, tl_kattis:$tlk}')" >/dev/null
+  _api_ex 30 /judge/tl-report --data "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" \
+        --argjson tl "$tlj" --argjson tlk "$tlk" '{host:$h, id:$id, checksum:$c, tl:$tl, tl_kattis:$tlk}')" && return 0
+  _api_gone && { _cache_mark_gone "$id"; return 3; }
+  return 1
 }
 
 # report_calib_log <id> <checksum> <logfile> [pkgdir] : envia ao MOJ o LOG de calibração
 # (limitado) + o report.html POR SOLUÇÃO (pkg/.calib-reports/*) + o vetor ESTRUTURADO `sols`
 # (pkg/.calib-sols.json do calibreitor: por solução, {file,lang,category,verdict,tests}), p/ o
 # autor ver no editor e processar com ferramentas externas. Falha não atrapalha o julgamento.
+# rc como o do report_tl (0 gravado; 3 = 404 `problem_gone`, entrada marcada; 1 falhou).
 report_calib_log() {
   local id="$1" cks="$2" lf="$3" pkg="${4:-}" log="" reports='[]'
   [[ -f "$lf" ]] && log="$(tail -c 60000 "$lf" 2>/dev/null)"
@@ -191,8 +218,14 @@ report_calib_log() {
     printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
           '{host:$h, id:$id, checksum:$c, log:$log, reports:.}' > "$bf" 2>/dev/null
   fi
-  [[ -s "$bf" ]] && _api_file /judge/calib-report "$bf"
+  local rc=1
+  if [[ -s "$bf" ]]; then
+    _api_file /judge/calib-report "$bf"; rc=$?
+    (( rc != 0 )) && _api_gone && rc=3
+  fi
   rm -f "$bf"
+  (( rc == 3 )) && _cache_mark_gone "$id"
+  return "$rc"
 }
 
 # ---- tetos DINÂMICOS de wall-clock (por job/por calibração) -------------------------
@@ -272,12 +305,19 @@ _calib_cap() {
 # mojtools anterior a 26/10/2026) não serve — recalibra (rápido) antes de julgar; nunca julga pela tabela errada.
 # Ecoa o diretório do pacote.
 ensure_cached() {
-  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" cdir meta mj sc local_cks
+  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" cdir meta mj ex sc local_cks
   [[ "$req_epoch" =~ ^[0-9]+$ ]] || req_epoch=0
   cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
   mkdir -p "$cdir" 2>/dev/null
   mj="$(_api_get "/judge/package-meta?id=$(_uri "$id")")"
-  [[ "$(jq -r '.exists // false' <<<"$mj" 2>/dev/null)" == true ]] || { alog "pkg inexistente: $id"; return 1; }
+  ex="$(jq -r '.exists | tostring' <<<"$mj" 2>/dev/null)"
+  if [[ "$ex" != true ]]; then
+    # só a resposta VÁLIDA `exists:false` marca a entrada (servidor fora do ar/resposta ruim não é "apagado")
+    [[ "$ex" == false ]] && _cache_mark_gone "$id"
+    alog "pkg inexistente: $id"; return 1
+  fi
+  # voltou a existir (movido de volta, recriado com o mesmo id): a marca sai e o TL é re-reportado
+  [[ -e "$cdir/.gone" ]] && { rm -f "$cdir/.gone"; force=1; }
   sc="$(jq -r '.checksum // empty' <<<"$mj" 2>/dev/null)"
   [[ -n "$sc" ]] || { alog "sem checksum p/ $id"; return 1; }
   local_cks="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
@@ -337,10 +377,11 @@ ensure_cached() {
        && _tl_has_method "$cdir/tl.$AGENT_HOST" "$meth"; then
       cp -f "$cdir/tl.$AGENT_HOST" "$cdir/pkg/tl.$AGENT_HOST" 2>/dev/null
       rm -f "$cdir/tl.$AGENT_HOST"
-      report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
+      local _rt; report_tl "$id" "$sc" "$cdir/pkg"; _rt=$?
+      (( _rt == 0 )) || alog "report_tl falhou $id (rc $_rt)"
       local calat; calat="$(jq -r '.calibrated_at // empty' "$meta" 2>/dev/null)"; [[ "$calat" =~ ^[0-9]+$ ]] || calat="$EPOCHSECONDS"
-      jq -cn --arg id "$id" --arg c "$sc" --argjson cal "$calat" --argjson now "$EPOCHSECONDS" \
-         '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$cal, reported_at:$now}' > "$meta"
+      jq -cn --arg id "$id" --arg c "$sc" --argjson cal "$calat" --argjson now "$EPOCHSECONDS" --argjson rt "$_rt" \
+         '{id:$id, checksum:$c, tl_reported:($rt == 0), calibrated_at:$cal, reported_at:(if $rt == 0 then $now else null end)}' > "$meta"
       alog "tl restaurado do stub p/ $id (cks=${sc:0:8}; sem recalibrar)"
     else
       # calibra (gera tl.$AGENT_HOST) e reporta. full=1 (Calibrar explícito) roda TODAS as soluções
@@ -371,11 +412,14 @@ ensure_cached() {
         alog "calibração de $id morta por sinal (teto ${_ccap}s)"; }
       [[ -f "$cdir/pkg/tl.$AGENT_HOST" ]] || { alog "calibração não gerou tl p/ $id (ver $cdir/.calib.log)"; exit 2; }
       rm -f "$cdir/tl.$AGENT_HOST"   # stub de checksum antigo (se havia) não vale mais
-      report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
-      report_calib_log "$id" "$sc" "$cdir/.calib.log" "$cdir/pkg"
-      jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" \
+      # `tl_reported` = o resultado REAL (até 26/10/2026 era true sempre): o inventário do register só lista o
+      # problema com o TL entregue, e o re-report do boot completa o que falhou aqui (report_cached_tls)
+      local _rt; report_tl "$id" "$sc" "$cdir/pkg"; _rt=$?
+      (( _rt == 0 )) || alog "report_tl falhou $id (rc $_rt)"
+      (( _rt == 3 )) || report_calib_log "$id" "$sc" "$cdir/.calib.log" "$cdir/pkg"
+      jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" --argjson rt "$_rt" \
          --argjson fl "$( [[ "$full" == 1 ]] && echo true || echo false )" \
-         '{id:$id, checksum:$c, tl_reported:true, calibrated_at:$now, reported_at:$now, full:$fl}' > "$meta"
+         '{id:$id, checksum:$c, tl_reported:($rt == 0), calibrated_at:$now, reported_at:(if $rt == 0 then $now else null end), full:$fl}' > "$meta"
       alog "cacheado+calibrado $id (cks=${sc:0:8}; teto ${_ccap}s)"
     fi
   ) 9>"$cdir.lock"
@@ -387,25 +431,45 @@ ensure_cached() {
 
 # report_cached_tls : ao subir/relançar, re-reporta o TL de todos os problemas do cache
 # já calibrados (o MOJ repovoa o TL por host sem recalibrar) — inclusive STUBS do GC
-# (pkg/ removido, tl.$AGENT_HOST preservado ao lado do meta).
+# (pkg/ removido, tl.$AGENT_HOST preservado ao lado do meta). Pula a entrada marcada `.gone` (o
+# servidor já disse que o problema não existe mais) e marca a que leva o 404 `problem_gone` agora;
+# a de `tl_reported:false` (o report da calibração falhou) que passa aqui vira true. Mudou o
+# inventário (marcou ou completou alguma)? pede re-registro — quem registra é o laço.
 report_cached_tls() {
-  local d id cks tldir n=0
+  local d id cks rep rt tldir n=0 ng=0 nh=0
   [[ -d "$JUDGE_CACHE" ]] || return 0
   while IFS= read -r d; do
-    [[ -f "$d/.moj-cache.json" ]] || continue
-    id="$(jq -r '.id // empty' "$d/.moj-cache.json" 2>/dev/null)"
-    cks="$(jq -r '.checksum // empty' "$d/.moj-cache.json" 2>/dev/null)"
+    [[ -f "$d/.moj-cache.json" && ! -e "$d/.gone" ]] || continue
+    id=""; cks=""; rep=""
+    { read -r id; read -r cks; read -r rep; } < <(jq -r '(.id // ""), (.checksum // ""), (.tl_reported // false)' \
+                                                      "$d/.moj-cache.json" 2>/dev/null)
     [[ -n "$id" && -n "$cks" ]] || continue
     if [[ -d "$d/pkg" && -f "$d/pkg/tl.$AGENT_HOST" ]]; then tldir="$d/pkg"
     elif [[ -f "$d/tl.$AGENT_HOST" ]]; then tldir="$d"        # stub do GC
     else continue; fi
-    report_tl "$id" "$cks" "$tldir" && n=$((n+1))
+    report_tl "$id" "$cks" "$tldir"; rt=$?
+    (( rt == 3 )) && { ng=$((ng+1)); continue; }
+    if (( rt == 0 )); then
+      n=$((n+1))
+      if [[ "$rep" != true ]]; then   # sob o lock do problema; ocupado = o ensure_cached grava o meta dele
+        ( flock -n 9 || exit 1
+          jq -c --arg c "$cks" --argjson now "$EPOCHSECONDS" \
+             'if .checksum == $c then .tl_reported = true | .reported_at = $now else . end' \
+             "$d/.moj-cache.json" > "$d/.moj-cache.json.t" 2>/dev/null && mv -f "$d/.moj-cache.json.t" "$d/.moj-cache.json"
+        ) 9>"$d.lock" && nh=$((nh+1))
+      fi
+    fi
     # re-envia também o LOG da calibração (sem o pkgdir -> sem os report.html, fica leve;
     # o vetor `sols` VAI junto — a cópia .calib-sols.json mora aqui no dir do cache) p/ a
     # interface não perder o "ver log" de cada juiz depois que o agente reinicia.
-    [[ -f "$d/.calib.log" ]] && report_calib_log "$id" "$cks" "$d/.calib.log"
+    if [[ -f "$d/.calib.log" ]]; then
+      report_calib_log "$id" "$cks" "$d/.calib.log"; (( $? == 3 )) && ng=$((ng+1))
+    fi
   done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
   (( n > 0 )) && alog "re-reportei TL+log de $n problema(s) do cache"
+  (( ng > 0 )) && alog "$ng problema(s) do cache não existem mais no servidor (marcados; o GC apaga)"
+  (( ng + nh > 0 )) && _request_register
+  return 0
 }
 
 # ----------------------------------------------------------------- GC do cache
@@ -441,7 +505,14 @@ gc_cache() {  # chamado no loop SÓ com BUSYPID==0 (nenhum julgamento em curso);
   [[ -f "$GC_STAMP" ]] && last="$(cat "$GC_STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
   (( now - last < AGENT_CACHE_GC_HOURS*3600 )) && return 0
   echo "$now" > "$GC_STAMP" 2>/dev/null
-  local d used cut n=0
+  local d used cut n=0 ng=0
+  # 0) problema que o servidor disse não existir mais (`.gone`, ver _cache_mark_gone): sai INTEIRO — pkg, stub,
+  #    meta, logs e o lock. Sob o lock do problema (ocupado = fica p/ a próxima varredura).
+  while IFS= read -r d; do
+    [[ -e "$d/.gone" ]] || continue
+    ( flock -n 9 || exit 1; rm -rf "$d"; rm -f "$d.lock" ) 9>"$d.lock" \
+      && { alog "[gc] ${d##*/}: o problema não existe mais no servidor — entrada removida"; ng=$((ng+1)); }
+  done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
   # 1) por idade de uso (.last-used; fallback: mtime do meta = época do download/calibração)
   if (( AGENT_CACHE_MAX_DAYS > 0 )); then
     cut=$(( now - AGENT_CACHE_MAX_DAYS*86400 ))
@@ -469,7 +540,8 @@ gc_cache() {  # chamado no loop SÓ com BUSYPID==0 (nenhum julgamento em curso);
                done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null) | sort -n)
     fi
   fi
-  (( n > 0 )) && { alog "[gc] $n pacote(s) viraram stub"; register; }
+  (( n > 0 )) && alog "[gc] $n pacote(s) viraram stub"
+  (( n + ng > 0 )) && register
   return 0
 }
 

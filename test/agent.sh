@@ -38,6 +38,7 @@ mkdir -p "$AGENT_WORK" "$JUDGE_CACHE"
 source "$JD/agent/moj-agent.sh"
 alog(){ :; }                       # silêncio (o teste fala pelo ck)
 _api(){ :; }; _api_file(){ :; }    # nenhuma rede
+_api_ex(){ _API_CODE=200; _API_BODY='{}'; }   # (o report_tl fala direto com ele)
 LOG="$W/calls"; : > "$LOG"
 register(){ echo "register" >> "$LOG"; }
 _post_judge_error(){ echo "judge-error $1 $6" >> "$LOG"; }
@@ -326,6 +327,116 @@ CR="$(cache_id_dir "o#rel")"; mkdir -p "$CR/pkg/tests/input"; : > "$CR/pkg/tests
 printf '{"id":"o#rel","checksum":"cks1"}' > "$CR/.moj-cache.json"
 out="$(MOJ_RELEASE_FILE="$W/released" ensure_cached "o#rel" 0 0 0 moj)"; DBG="$(cat "$CAL_LOG")"
 ck "calibrou sem o MOJ_RELEASE_FILE no ambiente" '[[ "$out" == "$CR/pkg" ]] && grep -qx "calib rel=SEM" "$CAL_LOG"'
+
+echo "== problema apagado: o 404 problem_gone é definitivo — não repete, marca, o boot pula, o GC apaga (26/10/2026) =="
+# o servidor responde 404 `problem_gone` ao report de problema que não existe mais; antes o agente repetia TODO
+# erro 3× (4 s por problema apagado no boot) e o re-report do boot batia nele a cada restart
+mkdir -p "$W/fbin"
+cat > "$W/fbin/curl" <<'EOC'
+#!/bin/bash
+# curl FALSO: a 1ª linha de $FAKE_ROUTES ("regex<TAB>código<TAB>corpo") cujo regex casa com "<caminho> <corpo>"
+# responde; nenhuma = sem resposta (000). Cada chamada vai p/ $FAKE_LOG como "curl <caminho> <id do corpo>".
+url="" data="" w="" f=0 id=""
+while (( $# )); do
+  case "$1" in
+    -w) w="$2"; shift ;;
+    --data) data="$2"; shift ;;
+    --data-binary) data="$2"; [[ "$data" == @* ]] && data="$(cat "${data#@}")"; shift ;;
+    -m|-H|-K|-o|--resolve) shift ;;
+    --*) ;;
+    -*) [[ "$1" == *f* ]] && f=1 ;;
+    *) url="$1" ;;
+  esac; shift
+done
+path="${url#*/api/v1}"; [[ "$data" =~ \"id\":\"([^\"]*)\" ]] && id="${BASH_REMATCH[1]}"
+echo "curl $path $id" >> "$FAKE_LOG"
+while IFS=$'\t' read -r re code body; do
+  [[ -n "$re" && "$path $data" =~ $re ]] || continue
+  (( code >= 400 && f )) && exit 22
+  printf '%s' "$body"; [[ -n "$w" ]] && printf '\n%s' "$code"
+  exit 0
+done < "$FAKE_ROUTES"
+[[ -n "$w" ]] && printf '\n000'
+exit 7
+EOC
+chmod +x "$W/fbin/curl"
+export FAKE_LOG="$W/fake.log" FAKE_ROUTES="$W/fake.routes"; PATH="$W/fbin:$PATH"
+source <(sed -n '/^_api_ex() {/,/^}/p; /^_api() {/,/^}/p; /^_api_file() {/,/^}/p' "$JD/agent/moj-agent.sh")
+sleep(){ echo "sleep $*" >> "$FAKE_LOG"; }   # as esperas entre tentativas, sem esperar
+route(){ printf '%s\t%s\t%s\n' "$@" >> "$FAKE_ROUTES"; }
+ncall(){ grep -c "^curl $1" "$FAKE_LOG"; }
+: > "$FAKE_ROUTES"
+route '^/x ' 404 '{"success":false,"error":{"code":"not_found"}}'; route '^/y ' 503 'fora'
+route '^/b ' 409 '{"success":false,"error":{"code":"busy"}}'; route '^/z ' 200 '{"ok":1}'
+: > "$FAKE_LOG"; _api_ex 5 /x --data '{}'; rc=$?; DBG="rc=$rc code=$_API_CODE $(cat "$FAKE_LOG")"
+ck "_api_ex: 404 = UMA tentativa, rc 1, o código e o corpo lidos" '[[ $rc == 1 && "$_API_CODE" == 404 && "$(jq -r .error.code <<<"$_API_BODY")" == not_found && "$(ncall /x)" == 1 ]]'
+: > "$FAKE_LOG"; _api_ex 5 /y --data '{}'; rc=$?; DBG="$(cat "$FAKE_LOG")"
+ck "_api_ex: 503 = três tentativas, duas esperas de 2 s" '[[ $rc == 1 && "$(ncall /y)" == 3 && "$(grep -c "^sleep 2$" "$FAKE_LOG")" == 2 ]]'
+: > "$FAKE_LOG"; _api_ex 5 /b --data '{}'; DBG="$(cat "$FAKE_LOG")"
+ck "_api_ex: 409 busy (lock do servidor) repete" '[[ "$(ncall /b)" == 3 ]]'
+: > "$FAKE_LOG"; _api_ex 5 /semrota --data '{}'; rc=$?
+ck "_api_ex: sem resposta (000) repete" '[[ $rc == 1 && "$_API_CODE" == 000 && "$(ncall /semrota)" == 3 ]]'
+: > "$FAKE_LOG"; out="$(_api /z '{}')"; rc=$?
+ck "_api: 200 devolve o corpo (o contrato de sempre)" '[[ $rc == 0 && "$out" == "{\"ok\":1}" && "$(ncall /z)" == 1 ]]'
+out="$(_api /x '{}')"; rc=$?
+ck "_api: 4xx = rc 1 e nada no stdout" '[[ $rc == 1 && -z "$out" ]]'
+printf '{}' > "$W/body.json"; : > "$FAKE_LOG"; _api_file /x "$W/body.json"; rc=$?
+ck "_api_file: 404 também não repete" '[[ $rc == 1 && "$(ncall /x)" == 1 ]]'
+
+# o cache: um vivo cujo report da calibração falhou (tl_reported:false), um apagado e um com 404 de OUTRA coisa
+: > "$FAKE_ROUTES"
+route '^/judge/(tl|calib)-report .*"id":"o#gone"' 404 '{"success":false,"error":{"message":"Problem not found (removed or moved)","code":"problem_gone"}}'
+route '^/judge/tl-report .*"id":"o#old404"' 404 '{"success":false,"error":{"code":"not_found"}}'
+route '^/judge/' 200 '{"success":true}'
+for p in vivo gone old404; do
+  C="$(cache_id_dir "o#$p")"; mkdir -p "$C/pkg"; cp "$TV" "$C/pkg/tl.t1"; echo log > "$C/.calib.log"
+  jq -cn --arg id "o#$p" --argjson r "$( [[ $p == vivo ]] && echo false || echo true )" '{id:$id, checksum:"cks1", tl_reported:$r}' > "$C/.moj-cache.json"
+done
+C="$(cache_id_dir "o#old404")"; mv "$C/pkg/tl.t1" "$C/tl.t1"; rm -rf "$C/pkg" "$C/.calib.log"   # stub do GC
+rm -f "$AGENT_WORK/.reregister"; : > "$FAKE_LOG"
+report_cached_tls; DBG="$(cat "$FAKE_LOG")"
+ck "boot: o apagado leva UM tl-report (sem repetir) e nenhum calib-report" '[[ "$(ncall "/judge/tl-report o#gone")" == 1 && "$(ncall "/judge/calib-report o#gone")" == 0 ]]'
+ck "…e a entrada ficou marcada (.gone)"         '[[ -s "$JUDGE_CACHE/o_gone/.gone" ]]'
+ck "404 sem problem_gone (servidor velho, rota errada) não marca" '[[ ! -e "$JUDGE_CACHE/o_old404/.gone" && "$(ncall "/judge/tl-report o#old404")" == 1 ]]'
+ck "o vivo: TL e log re-reportados e o tl_reported:false vira true" '[[ "$(ncall "/judge/tl-report o#vivo")" == 1 && "$(ncall "/judge/calib-report o#vivo")" == 1 && "$(jq -r .tl_reported "$JUDGE_CACHE/o_vivo/.moj-cache.json")" == true ]]'
+ck "o inventário mudou ⇒ pede re-registro"     '[[ -e "$AGENT_WORK/.reregister" ]]'
+ck "inventário: sem o apagado, com o vivo"      '[[ "$(agent_problems_json | jq -c "[has(\"o#gone\"), has(\"o#vivo\")]")" == "[false,true]" ]]'
+rm -f "$AGENT_WORK/.reregister"; : > "$FAKE_LOG"
+report_cached_tls; DBG="$(cat "$FAKE_LOG")"
+ck "2º boot: o apagado nem é tentado; nada mudou, nada a re-registrar" '! grep -q "o#gone" "$FAKE_LOG" && [[ "$(ncall "/judge/tl-report o#vivo")" == 1 && ! -e "$AGENT_WORK/.reregister" ]]'
+GC_STAMP="$W/gc.stamp"; : > "$LOG"
+gc_cache
+ck "GC: a entrada apagada sai inteira (dir e lock); a viva fica" '[[ ! -e "$JUDGE_CACHE/o_gone" && ! -e "$JUDGE_CACHE/o_gone.lock" && -d "$JUDGE_CACHE/o_vivo/pkg" ]]'
+ck "…e re-registra"                             'grep -qx register "$LOG"'
+
+# o package-meta: `exists:false` VÁLIDO marca; sem resposta não; existir de novo tira a marca e re-reporta o TL
+_api_get(){ printf '{"id":"o#vivo","exists":false,"checksum":"","tl_checksum":""}'; }
+ensure_cached "o#vivo" >/dev/null; rc=$?
+ck "package-meta exists:false: rc 1 e a entrada marcada" '[[ $rc == 1 && -e "$JUDGE_CACHE/o_vivo/.gone" ]]'
+rm -f "$JUDGE_CACHE/o_vivo/.gone"; _api_get(){ :; }
+ensure_cached "o#vivo" >/dev/null
+ck "package-meta sem resposta (servidor fora) não marca" '[[ ! -e "$JUDGE_CACHE/o_vivo/.gone" ]]'
+: > "$JUDGE_CACHE/o_vivo/.gone"; _api_get(){ printf '{"exists":true,"checksum":"cks1"}'; }; : > "$FAKE_LOG"
+out="$(ensure_cached "o#vivo" 0 0 0 moj)"; DBG="$out | $(cat "$FAKE_LOG")"
+ck "voltou a existir: a marca sai e o TL é re-reportado" '[[ "$out" == "$JUDGE_CACHE/o_vivo/pkg" && ! -e "$JUDGE_CACHE/o_vivo/.gone" && "$(ncall "/judge/tl-report o#vivo")" == 1 ]]'
+
+# a calibração: tl_reported com o resultado REAL (era true sempre); apagado no meio = marca, sem calib-report
+cat > "$W/mt/calibreitor.sh" <<'EOC'
+printf 'TL[c]=.3035\nTL[default]=.3035\n' > "$1/tl.$HOSTNAME"
+EOC
+: > "$FAKE_ROUTES"
+route '^/judge/tl-report .*"id":"o#t500"' 500 'erro'
+route '^/judge/tl-report .*"id":"o#tgone"' 404 '{"success":false,"error":{"code":"problem_gone"}}'
+route '^/judge/' 200 '{"success":true}'
+for p in t500 tgone; do C="$(cache_id_dir "o#$p")"; mkdir -p "$C/pkg/tests/input"; : > "$C/pkg/tests/input/t1"; : > "$C/pkg/conf"
+  printf '{"id":"o#%s","checksum":"cks2"}' "$p" > "$C/.moj-cache.json"; done   # pacote já baixado, sem tabela: calibra
+_api_get(){ printf '{"exists":true,"checksum":"cks2"}'; }
+: > "$FAKE_LOG"; ensure_cached "o#t500" 0 0 0 moj >/dev/null; DBG="$(cat "$JUDGE_CACHE/o_t500/.moj-cache.json") | $(cat "$FAKE_LOG")"
+ck "tl-report falhou (500 × 3): tl_reported:false, sem reported_at; o log vai assim mesmo" '[[ "$(jq -c "[.tl_reported, .reported_at]" "$JUDGE_CACHE/o_t500/.moj-cache.json")" == "[false,null]" && "$(ncall "/judge/tl-report o#t500")" == 3 && "$(ncall "/judge/calib-report o#t500")" == 1 ]]'
+ck "…e fica fora do inventário até o re-report do boot" '[[ "$(agent_problems_json | jq -r "has(\"o#t500\")")" == false ]]'
+: > "$FAKE_LOG"; ensure_cached "o#tgone" 0 0 0 moj >/dev/null; DBG="$(cat "$FAKE_LOG")"
+ck "apagado durante a calibração: marca, tl_reported:false, nenhum calib-report" '[[ -e "$JUDGE_CACHE/o_tgone/.gone" && "$(jq -r .tl_reported "$JUDGE_CACHE/o_tgone/.moj-cache.json")" == false && "$(ncall "/judge/calib-report o#tgone")" == 0 ]]'
+unset -f sleep
 
 echo; echo "RESULT: $pass passed, $fail failed"
 (( fail == 0 ))

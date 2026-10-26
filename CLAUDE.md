@@ -96,6 +96,16 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     **restaurado sem recalibrar** no próximo uso com o MESMO checksum; checksum novo =
     recalibra como sempre). Teto opcional `AGENT_CACHE_MAX_MB` (evict LRU). O sweep respeita
     o flock por-problema e pula downloads em curso.
+  - **Problema que não existe mais (26/10/2026)**: os POSTs passam por `_api_ex` (lê o código HTTP em
+    `_API_CODE`/`_API_BODY`; `_api`/`_api_file` mantêm o contrato), que só repete 000/408/409/429/5xx — antes
+    todo erro era repetido 3×. O 404 `problem_gone` do `tl-report`/`calib-report` faz `report_tl`/
+    `report_calib_log` devolverem **rc 3** e marcarem a entrada (`_cache_mark_gone`: arquivo `<cache>/<id>/.gone`,
+    não campo do meta — marcar não disputa o meta com o `ensure_cached`); `exists:false` VÁLIDO no package-meta
+    também marca (sem resposta não). A marca tira a entrada do inventário (`agent_problems_json`) e do re-report do
+    boot, e o GC apaga o diretório inteiro (passo 0, sob o flock do problema); package-meta `exists:true` de novo
+    tira a marca e re-reporta o TL. O `tl_reported` do meta grava o resultado REAL do report (era true sempre): o
+    inventário só lista o que o servidor recebeu, e o re-report do boot completa o que falhou (vira true e pede
+    re-registro).
   - **Token nunca no argv**: os curls usam `curl -K <authfile>` (config 600 em
     `$XDG_RUNTIME_DIR`/`/dev/shm`, removido no EXIT) — `ps`/`/proc/*/cmdline` não veem o
     `mojw_…`; o `TOKEN` também é `unset` após montar o arquivo (não vaza em `/proc/*/environ`).

@@ -161,7 +161,7 @@ agent_toolchain_json() {
 agent_problems_json() {
   [[ -d "$JUDGE_CACHE" ]] || { echo '{}'; return; }
   { while IFS= read -r d; do
-      [[ -f "$d/.moj-cache.json" ]] || continue
+      [[ -f "$d/.moj-cache.json" && ! -e "$d/.gone" ]] || continue   # .gone: o problema não existe mais no servidor
       jq -c 'select(.id and .tl_reported) | {(.id): (.checksum // "")}' "$d/.moj-cache.json" 2>/dev/null
     done < <(find "$JUDGE_CACHE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null); } \
     | jq -s -c 'add // {}'
