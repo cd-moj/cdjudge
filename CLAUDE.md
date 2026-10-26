@@ -80,7 +80,9 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     do package-meta). Vai ao build-and-test por `MOJ_TLFILE` e ao `_job_cap` (4º arg). O 3º arg é SÓ o `tl_class`
     (o job leva o código em base64: >128 KiB num argumento do jq); chave/valor/host fora do formato não entram
     (o arquivo é `source`ado). Sem classe, servidor antigo ou checksum diferente: a tabela local.
-  - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports, o
+  - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports (TODOS os report.html
+    até `AGENT_REPORT_MAX_BYTES` por arquivo e `AGENT_REPORTS_MAX_BYTES` no total — o que não cabe é pulado, os
+    seguintes ainda entram, e sai no log; o teto era 12 POR CONTAGEM e o olamundo perdia os 3 últimos), o
     campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
     via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;
     pkg presente SEM o arquivo remove a cópia (nunca re-enviar dado velho). O `_job_cap`

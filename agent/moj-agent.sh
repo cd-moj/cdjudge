@@ -37,6 +37,12 @@ mkdir -p "$JUDGE_CACHE" 2>/dev/null
 # vazia, e o calibreitor roda as soluções do mesmo tipo em paralelo, uma por grupo. 0 = desliga aqui (a calibração
 # volta a 1 grupo; o calibreitor também recebe MOJ_CALIB_LANES=0, inclusive a disparada por um job).
 : "${AGENT_CALIB_LANES:=1}"
+# REPORTS DA CALIBRAÇÃO (26/10/2026): o report.html de CADA solução vai ao servidor até AGENT_REPORTS_MAX_BYTES no
+# total (6 MB = o pior caso do teto antigo, 12 × 500 KB) e AGENT_REPORT_MAX_BYTES por arquivo; o que fica de fora
+# sai no log. O teto era 12 POR CONTAGEM: o olamundo (15 soluções de 8,5 KB) perdia os 3 últimos em ordem
+# alfabética (a .pas, a .rs e a slow) e o editor ficava sem o link do report deles.
+: "${AGENT_REPORT_MAX_BYTES:=500000}"
+: "${AGENT_REPORTS_MAX_BYTES:=6000000}"
 # Config de partição APLICADA persiste aqui (P6): um restart re-adota exatamente o que rodava
 # (o agent.env é só o último fallback — make config o regrava e já causou o wedge C5).
 AGENT_STATE="${AGENT_STATE:-$(dirname "$JUDGE_CACHE")/agent-state.json}"
@@ -230,18 +236,26 @@ report_tl() {
 # (limitado) + o report.html POR SOLUÇÃO (pkg/.calib-reports/*) + o vetor ESTRUTURADO `sols`
 # (pkg/.calib-sols.json do calibreitor: por solução, {file,lang,category,verdict,tests}), p/ o
 # autor ver no editor e processar com ferramentas externas. Falha não atrapalha o julgamento.
+# Os reports vão TODOS até os tetos de bytes (AGENT_REPORT_MAX_BYTES, AGENT_REPORTS_MAX_BYTES); o que não
+# coube é pulado (os seguintes ainda entram) e sai no log. Uma linha JSON por report num arquivo: montar o
+# array no shell refazia o parse do acumulado a cada report.
 # rc como o do report_tl (0 gravado; 3 = 404 `problem_gone`, entrada marcada; 1 falhou).
 report_calib_log() {
-  local id="$1" cks="$2" lf="$3" pkg="${4:-}" log="" reports='[]'
+  local id="$1" cks="$2" lf="$3" pkg="${4:-}" log="" rtmp
   [[ -f "$lf" ]] && log="$(tail -c 60000 "$lf" 2>/dev/null)"
+  rtmp="$(mktemp)"
   if [[ -d "$pkg/.calib-reports" ]]; then
-    local rf n=0 sz
+    local rf sz rn tot=0 skip=()
     for rf in "$pkg/.calib-reports/"*.html; do
       [[ -f "$rf" ]] || continue
-      sz="$(stat -c%s "$rf" 2>/dev/null || echo 0)"; (( sz > 0 && sz <= 500000 )) || continue
-      (( n++ >= 12 )) && break
-      reports="$(jq -c --arg n "$(basename "$rf" .html)" --rawfile h "$rf" '. + [{name:$n, html_b64:($h|@base64)}]' <<<"$reports" 2>/dev/null)" || reports='[]'
+      sz="$(stat -c%s "$rf" 2>/dev/null || echo 0)"; (( sz > 0 )) || continue
+      rn="$(basename "$rf" .html)"
+      if (( sz > AGENT_REPORT_MAX_BYTES || tot + sz > AGENT_REPORTS_MAX_BYTES )); then
+        skip+=("$rn ($(( (sz + 1023) / 1024 )) KB)"); continue
+      fi
+      jq -cn --arg n "$rn" --rawfile h "$rf" '{name:$n, html_b64:($h|@base64)}' >> "$rtmp" 2>/dev/null && tot=$((tot + sz))
     done
+    (( ${#skip[@]} )) && alog "calib-report de $id: ${#skip[@]} report(s) fora do envio (teto de $((AGENT_REPORT_MAX_BYTES / 1024)) KB por report, $((AGENT_REPORTS_MAX_BYTES / 1024)) KB no total): ${skip[*]}"
   fi
   # sols: a cópia no dir do CACHE ($cdir, ao lado do .calib.log) sobrevive ao GC do pkg e
   # alimenta o re-envio de boot. pkg presente SEM o arquivo = calibração sem sols (abortada/
@@ -256,22 +270,22 @@ report_calib_log() {
      && jq -e 'type=="array"' "$cdir/.calib-sols.json" >/dev/null 2>&1; then
     solsf="$cdir/.calib-sols.json"
   fi
-  # monta o corpo num ARQUIVO: reports (stdin) e sols (--slurpfile) — grandes NUNCA por argv.
+  # monta o corpo num ARQUIVO: reports e sols por --slurpfile — grandes NUNCA por argv.
   local bf; bf="$(mktemp)"
   if [[ -n "$solsf" ]]; then
-    printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
-          --slurpfile s "$solsf" \
-          '{host:$h, id:$id, checksum:$c, log:$log, reports:., sols:($s[0] // [])}' > "$bf" 2>/dev/null
+    jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
+          --slurpfile r "$rtmp" --slurpfile s "$solsf" \
+          '{host:$h, id:$id, checksum:$c, log:$log, reports:$r, sols:($s[0] // [])}' > "$bf" 2>/dev/null
   else
-    printf '%s' "$reports" | jq -c --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" \
-          '{host:$h, id:$id, checksum:$c, log:$log, reports:.}' > "$bf" 2>/dev/null
+    jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" --arg log "$log" --slurpfile r "$rtmp" \
+          '{host:$h, id:$id, checksum:$c, log:$log, reports:$r}' > "$bf" 2>/dev/null
   fi
   local rc=1
   if [[ -s "$bf" ]]; then
     _api_file /judge/calib-report "$bf"; rc=$?
     (( rc != 0 )) && _api_gone && rc=3
   fi
-  rm -f "$bf"
+  rm -f "$bf" "$rtmp"
   (( rc == 3 )) && _cache_mark_gone "$id"
   return "$rc"
 }

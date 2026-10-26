@@ -192,6 +192,11 @@ O sweep respeita o flock por-problema e pula download em curso, então não atro
 calibreitor roda as soluções do mesmo tipo em paralelo, uma por grupo. `AGENT_CALIB_LANES=0` no `agent.env`
 desliga (a calibração volta a usar 1 grupo).
 
+**Reports da calibração.** O agente manda ao servidor o `report.html` de cada solução calibrada (o "📄 report" do
+editor). O limite é de bytes: `AGENT_REPORT_MAX_BYTES` por arquivo (500 KB) e `AGENT_REPORTS_MAX_BYTES` no total
+(6 MB). O report que não cabe fica de fora e aparece no log do agente. Até 26/10/2026 o limite era de 12 reports, e
+um problema com mais soluções perdia o report das últimas.
+
 **Juízes idênticos, mesmo tempo-limite.** O servidor agrupa os juízes por classe de hardware (processador,
 número de CPUs e memória, do `register`). Cada job traz o maior tempo-limite entre os juízes da classe
 (`tl_class`), e o agente julga pelo maior entre ele e a própria tabela. Assim, o veredicto não depende de qual

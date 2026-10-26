@@ -514,6 +514,30 @@ ck "…e o result leva tl_used 0,4"               '[[ "$(jq -r .tl_used "$FAKE_L
 JOBJ="$(jq -c 'del(.tl_class) | .id = "jc2"' <<<"$JOBJ")"; : > "$CAL_LOG"
 ( TMPDIR="$W/tj"; run_job "$JOBJ" "" ); DBG="$(cat "$CAL_LOG")"
 ck "job sem tl_class: a tabela local, sem MOJ_TLFILE (c = 0,3)" 'grep -qx "bat tlfile=SEM tl=.3" "$CAL_LOG"'
+
+# ---- REPORTS DA CALIBRAÇÃO (26/10/2026): todos os report.html até os tetos de BYTES — o teto era 12 POR CONTAGEM e
+# o olamundo (15 soluções de 8,5 KB) perdia os 3 últimos em ordem alfabética (a .pas, a .rs e a slow)
+RP="$W/rp"; mkdir -p "$RP/pkg/.calib-reports"; : > "$RP/.calib.log"
+for i in $(seq -w 1 15); do { printf '<html>'; head -c 8000 /dev/zero | tr '\0' x; printf '</html>'; } > "$RP/pkg/.calib-reports/good-s$i.c.html"; done
+ALOG="$W/alog.txt"; : > "$ALOG"; alog(){ echo "$*" >> "$ALOG"; }
+_api_file(){ cp "$2" "$W/rp.body"; return 0; }
+report_calib_log "o#rp" "cks1" "$RP/.calib.log" "$RP/pkg"; DBG="$(jq -c '[.reports[].name]' "$W/rp.body" 2>&1 | head -c 300)"
+ck "15 reports pequenos: vão os 15 (o teto era 12)" '[[ "$(jq ".reports | length" "$W/rp.body")" == 15 && "$(jq -r ".reports[-1].name" "$W/rp.body")" == good-s15.c ]]'
+ck "…com o conteúdo do arquivo"                    '[[ "$(jq -r ".reports[0].html_b64" "$W/rp.body" | base64 -d | head -c 6)" == "<html>" ]]'
+ck "…e nada no log de pulados"                     '[[ ! -s "$ALOG" ]]'
+# um report acima do teto POR ARQUIVO e o orçamento TOTAL: o que não cabe é pulado, os seguintes ainda entram, o log diz quais
+head -c 600000 /dev/zero | tr '\0' y > "$RP/pkg/.calib-reports/good-big.c.html"
+head -c 100 /dev/zero | tr '\0' z > "$RP/pkg/.calib-reports/slow-z.c.html"
+AGENT_REPORTS_MAX_BYTES=100000 report_calib_log "o#rp" "cks1" "$RP/.calib.log" "$RP/pkg"; DBG="$(jq -c '[.reports[].name]' "$W/rp.body") | $(cat "$ALOG")"
+ck "teto por arquivo: o de 586 KB fica de fora"   '! jq -e ".reports[] | select(.name == \"good-big.c\")" "$W/rp.body" >/dev/null'
+ck "orçamento de 100 KB: os 12 primeiros pequenos cabem, os 3 seguintes não" '[[ "$(jq -c "[.reports[].name | select(startswith(\"good-s\"))] | [length, .[-1]]" "$W/rp.body")" == "[12,\"good-s12.c\"]" ]]'
+ck "…e o que vem depois e cabe ainda entra (pula, não para)" 'jq -e ".reports[-1].name == \"slow-z.c\"" "$W/rp.body" >/dev/null'
+ck "o log diz o que ficou de fora e o tamanho"      'grep -q "4 report(s) fora do envio" "$ALOG" && grep -q "good-big.c (586 KB)" "$ALOG" && grep -q "good-s15.c (8 KB)" "$ALOG"'
+# re-envio de boot (sem o pkg): reports vazio — o servidor preserva os da mesma versão
+report_calib_log "o#rp" "cks1" "$RP/.calib.log"
+ck "sem o pkg: reports vazio, corpo válido"         'jq -e "(.reports == []) and (.id == \"o#rp\")" "$W/rp.body" >/dev/null'
+ck "nenhum temporário sobra"                        '[[ "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -newer "$RP/.calib.log" -name "tmp.*" -type f 2>/dev/null | wc -l)" == 0 ]]'
+alog(){ :; }
 unset -f sleep
 
 echo; echo "RESULT: $pass passed, $fail failed"
