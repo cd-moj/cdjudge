@@ -163,6 +163,50 @@ _tl_has_method() {
   grep -q '^TLKATTIS\[' "$1" 2>/dev/null
 }
 
+# _tl_job_file <pkgdir> <cachedir> <tl_class-json> <saída> : a tabela do JOB com o TL da CLASSE DE HARDWARE
+# (26/10/2026). Juízes idênticos calibram TLs um pouco diferentes, e o veredicto de quem está no limite dependia de
+# qual juiz pegava o envio. O servidor manda no job `tl_class` = o máx, por linguagem, entre os juízes da classe
+# deste (cdmoj judge-gw/sched-lib.sh `_TLCLASS_DEF`). Vale só com o MESMO tl_checksum do pacote em cache (o
+# `.tl_checksum` que o ensure_cached grava do package-meta): aí a saída = a tabela local + uma linha por chave em
+# que a classe é MAIOR (o `source` do build-and-test fica com a última) — nunca abaixo da medição deste juiz; py
+# shim, TLMOD, TLOVERRIDE e drift seguem no build-and-test, uma vez só. O 3º arg é SÓ o `tl_class` (o job inteiro
+# leva o código em base64 e estouraria os 128 KiB de um argumento do jq). Chave/valor fora do formato não entram
+# (o arquivo é `source`ado). Ecoa a saída, ou nada (sem classe, servidor antigo, checksum diferente ou nada a
+# subir: o job usa a tabela local, como antes).
+_tl_job_file() {
+  local pkg="$1" cdir="$2" tlc="$3" out="$4" loc tcks lines
+  [[ -n "$tlc" && "$tlc" != null ]] || return 0
+  loc="$pkg/tl.$AGENT_HOST"; [[ -f "$loc" ]] || loc="$pkg/tl"
+  [[ -f "$loc" && -f "$cdir/.tl_checksum" ]] || return 0
+  tcks="$(<"$cdir/.tl_checksum")"; [[ -n "$tcks" ]] || return 0
+  lines="$( ( declare -A TL TLMOD TLKATTIS; source "$loc" 2>/dev/null
+              for k in "${!TL[@]}"; do printf 'TL\t%s\t%s\n' "$k" "${TL[$k]}"; done
+              for k in "${!TLKATTIS[@]}"; do printf 'TLKATTIS\t%s\t%s\n' "$k" "${TLKATTIS[$k]}"; done ) \
+    | jq -R -r -s --arg c "$tcks" --argjson tc "$tlc" '
+        def num: if test("^([0-9]+\\.?[0-9]*|\\.[0-9]+)$") then (if startswith(".") then "0" + . else . end | tonumber) else null end;
+        (split("\n") | map(select(length > 0) | split("\t") | select(length == 3))
+         | reduce .[] as $l ({TL: {}, TLKATTIS: {}}; .[$l[0]][$l[1]] = $l[2])) as $loc
+        | if ($tc | type) != "object" or ($tc.checksum // "") != $c then empty
+          else [ [["TL", "tl"], ["TLKATTIS", "tl_kattis"]][] as [$arr, $f]
+                 | ($loc[$arr]) as $lm
+                 | ($tc[$f] // {}) | to_entries[]
+                 | select((.key | test("^[A-Za-z0-9]{1,16}$")) and ((.value | tostring | num) != null))
+                 | (.value | tostring) as $v
+                 | ($lm[.key] // (if .key == "py" then ($lm.py3 // $lm.py2) else null end)) as $lv
+                 | select($lv == null or ($lv | num) == null or ($v | num) > ($lv | num))
+                 | "\($arr)[\(.key)]=\($v)" ] as $L
+            | if ($L | length) == 0 then empty
+              else "# TL da classe de hardware (o máx entre os juízes idênticos: "
+                     + (($tc.hosts // []) | map(tostring | gsub("[^A-Za-z0-9._-]"; "")) | join(" ")) + ") — maior que a medição local",
+                   (if any($L[]; startswith("TLKATTIS[")) then "declare -A TLKATTIS" else empty end),
+                   $L[]
+              end
+          end' 2>/dev/null)"
+  [[ -n "$lines" ]] || return 0
+  { cat "$loc"; printf '\n%s\n' "$lines"; } > "$out" 2>/dev/null || return 0
+  printf '%s' "$out"
+}
+
 # report_tl <id> <checksum> <pkgdir> : reporta ao MOJ o TL calibrado (tl.$AGENT_HOST) — as duas metades.
 # rc 0 = gravado; 3 = o problema não existe mais no servidor (404 `problem_gone`; a entrada do cache fica
 # marcada, ver _cache_mark_gone); 1 = falhou (sem resposta, 5xx depois das tentativas, outro 4xx).
@@ -229,10 +273,11 @@ report_calib_log() {
 }
 
 # ---- tetos DINÂMICOS de wall-clock (por job/por calibração) -------------------------
-# _job_cap <pkgdir> <lang> [método] -> segundos p/ UM julgamento: (TL+2.2)s/teste ×2 (rerun de TLE)
-# + compile-tl + folga. Piso 300s; fallback fixo se o pacote não dá p/ ler.
+# _job_cap <pkgdir> <lang> [método] [tabela] -> segundos p/ UM julgamento: (TL+2.2)s/teste ×2 (rerun de TLE)
+# + compile-tl + folga. Piso 300s; fallback fixo se o pacote não dá p/ ler. `tabela` = a do job (o tl.job do
+# _tl_job_file, com o TL da classe de hardware); ausente = a local, tl.$AGENT_HOST.
 _job_cap() {
-  local pkg="$1" lang="$2" meth="${3:-}" n tl compl cap
+  local pkg="$1" lang="$2" meth="${3:-}" tlf="${4:-$1/tl.$AGENT_HOST}" n tl compl cap
   n="$(find "$pkg/tests/input" -maxdepth 1 -type f 2>/dev/null | wc -l)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || { printf '%s' "$AGENT_HARD_TL_FALLBACK"; return; }
   # TLOVERRIDE do conf (o autor manda no TL) tem de entrar no TETO: com override de 10s e
@@ -240,7 +285,8 @@ _job_cap() {
   # O MÉTODO do TL (o do job › TLMETHOD do conf) escolhe a metade da tabela: o TL Kattis costuma ser
   # bem maior que o MOJ (arredonda p/ cima a 1 s), e um teto do MOJ mataria o job Kattis legítimo.
   # TLMOD sum/mult (que o build-and-test aplica) entram também.
-  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE TLKATTIS; source "$pkg/tl.$AGENT_HOST" 2>/dev/null
+  # a tabela do JOB (4º arg: o tl.job com o TL da classe de hardware, _tl_job_file) ou a local
+  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE TLKATTIS; source "$tlf" 2>/dev/null
            source "$pkg/conf" 2>/dev/null
            m="${meth:-${TLMETHOD:-moj}}"; b=""
            if [[ "$m" == kattis && ${#TLKATTIS[@]} -gt 0 ]]; then b="${TLKATTIS[$lang]:-${TLKATTIS[default]:-}}"
@@ -305,12 +351,13 @@ _calib_cap() {
 # mojtools anterior a 26/10/2026) não serve — recalibra (rápido) antes de julgar; nunca julga pela tabela errada.
 # Ecoa o diretório do pacote.
 ensure_cached() {
-  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" cdir meta mj ex sc local_cks
+  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" cdir meta mj ex sc tck local_cks
   [[ "$req_epoch" =~ ^[0-9]+$ ]] || req_epoch=0
   cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
   mkdir -p "$cdir" 2>/dev/null
   mj="$(_api_get "/judge/package-meta?id=$(_uri "$id")")"
-  ex="$(jq -r '.exists | tostring' <<<"$mj" 2>/dev/null)"
+  ex=""; sc=""; tck=""
+  { read -r ex; read -r sc; read -r tck; } < <(jq -r '(.exists | tostring), (.checksum // ""), (.tl_checksum // "")' <<<"$mj" 2>/dev/null)
   if [[ "$ex" != true ]]; then
     # só a resposta VÁLIDA `exists:false` marca a entrada (servidor fora do ar/resposta ruim não é "apagado")
     [[ "$ex" == false ]] && _cache_mark_gone "$id"
@@ -318,8 +365,12 @@ ensure_cached() {
   fi
   # voltou a existir (movido de volta, recriado com o mesmo id): a marca sai e o TL é re-reportado
   [[ -e "$cdir/.gone" ]] && { rm -f "$cdir/.gone"; force=1; }
-  sc="$(jq -r '.checksum // empty' <<<"$mj" 2>/dev/null)"
   [[ -n "$sc" ]] || { alog "sem checksum p/ $id"; return 1; }
+  # o tl_checksum ESTREITO (o carimbo do TL) do pacote AGORA: o job só usa o TL da classe de hardware que o
+  # servidor mandou (`tl_class`, _tl_job_file) com o mesmo carimbo. Grava só quando muda (troca atômica).
+  if [[ "$tck" =~ ^[a-f0-9]{6,64}$ ]] && ! { [[ -f "$cdir/.tl_checksum" ]] && [[ "$(<"$cdir/.tl_checksum")" == "$tck" ]]; }; then
+    printf '%s' "$tck" > "$cdir/.tl_checksum.$BASHPID" 2>/dev/null && mv -f "$cdir/.tl_checksum.$BASHPID" "$cdir/.tl_checksum" 2>/dev/null
+  fi
   local_cks="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
 
   # cache válido (mesma versão) + já calibrado: opcionalmente re-reporta e sai (full=1 recalibra)
@@ -634,7 +685,9 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   # fora dos carimbos do pacote, então o conf do cache pode estar velho). Vai ao build-and-test (MOJ_TL_METHOD),
   # ao teto do job e ao ensure_cached (job kattis com tabela sem a metade Kattis recalibra antes de julgar).
   # Servidor antigo (sem o campo): vazio — o build-and-test usa o TLMETHOD do conf, como sempre.
-  local tlm; tlm="$(jq -r '.tl_method // empty' <<<"$job")"
+  # `tl_class` (26/10/2026) = o TL da classe de hardware deste juiz (o máx entre os idênticos; _tl_job_file).
+  local tlm="" tlc=""
+  { read -r tlm; read -r tlc; } < <(jq -r '(.tl_method // ""), (.tl_class // null | if . == null then "" else tojson end)' <<<"$job" 2>/dev/null)
   [[ "$tlm" == moj || "$tlm" == kattis ]] || tlm=""
 
   # garante o pacote no cache (baixa + calibra na 1ª vez / se mudou)
@@ -645,17 +698,23 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   local work src; work="$(mktemp -d)"; src="$work/$filename"
   printf '%s' "$code_b64" | base64 -d > "$src" 2>/dev/null
 
+  # JUÍZES IDÊNTICOS, MESMO TL: com o `tl_class` do servidor (e o mesmo tl_checksum), a tabela do job é a local
+  # com o TL da classe onde ele é maior (_tl_job_file) — vai ao build-and-test (MOJ_TLFILE vence a seleção
+  # tl.<host>/tl) e ao teto do job. Vazio = a tabela local, como antes.
+  local tljob; tljob="$(_tl_job_file "$pkg" "$(cache_id_dir "$problem")" "$tlc" "$work/tl.job")"
+  [[ -n "$tljob" ]] && alog "id=$id: TL da classe de hardware ($(grep -c '^TL' "$tljob" 2>/dev/null) linha(s) acima da medição local)"
+
   local out wb verdict jcap jrc
   # MOJ_PROBLEM_ID: id real do problema p/ o report (o pacote no cache é <id>/pkg) + ativa a
   # coleta do toolchain no build-and-test (só p/ submissão real, não na calibração).
   # TETO DE WALL-CLOCK dinâmico (TL×testes×2 + compile + folga): o laço principal mata a árvore
   # e reporta Judge Error quando o `.deadline` passa — um job preso em infra/sandbox morre
   # sozinho e nunca entope o juiz (e o reset alcança tudo: sem `timeout`, sem pgroup à parte).
-  jcap="$(_job_cap "$pkg" "$lang" "$tlm")"
+  jcap="$(_job_cap "$pkg" "$lang" "$tlm" "$tljob")"
   _slot_deadline "$jcap"
   # stderr do b-a-t em ARQUIVO (era /dev/null): quando ele morre por sinal, a única pista do
   # motivo é essa — a Maratona 29/08 custou uma manhã de forense por causa do descarte.
-  out="$(MOJ_PROBLEM_ID="$problem" MOJ_TL_METHOD="$tlm" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
+  out="$(MOJ_PROBLEM_ID="$problem" MOJ_TL_METHOD="$tlm" MOJ_TLFILE="$tljob" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
   jrc=$?
   _slot_deadline_clear
   wb="$(printf '%s\n' "$out" | head -n1)"

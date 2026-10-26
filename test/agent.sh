@@ -349,7 +349,7 @@ while (( $# )); do
   esac; shift
 done
 path="${url#*/api/v1}"; [[ "$data" =~ \"id\":\"([^\"]*)\" ]] && id="${BASH_REMATCH[1]}"
-echo "curl $path $id" >> "$FAKE_LOG"
+echo "curl $path $id" >> "$FAKE_LOG"; printf '%s' "$data" > "$FAKE_LOG.body.${path//[^A-Za-z0-9]/_}"
 while IFS=$'\t' read -r re code body; do
   [[ -n "$re" && "$path $data" =~ $re ]] || continue
   (( code >= 400 && f )) && exit 22
@@ -436,6 +436,60 @@ ck "tl-report falhou (500 × 3): tl_reported:false, sem reported_at; o log vai a
 ck "…e fica fora do inventário até o re-report do boot" '[[ "$(agent_problems_json | jq -r "has(\"o#t500\")")" == false ]]'
 : > "$FAKE_LOG"; ensure_cached "o#tgone" 0 0 0 moj >/dev/null; DBG="$(cat "$FAKE_LOG")"
 ck "apagado durante a calibração: marca, tl_reported:false, nenhum calib-report" '[[ -e "$JUDGE_CACHE/o_tgone/.gone" && "$(jq -r .tl_reported "$JUDGE_CACHE/o_tgone/.moj-cache.json")" == false && "$(ncall "/judge/calib-report o#tgone")" == 0 ]]'
+
+echo "== juízes idênticos, mesmo TL: o tl_class do job vira a tabela do job (tl.job, 26/10/2026) =="
+# o servidor manda no job o máx entre os juízes da classe de hardware deste; o agente julga pelo MAIOR entre a
+# classe e a própria medição, só com o mesmo tl_checksum, e o arquivo é `source`ado: nada fora do formato entra
+CK="$(cache_id_dir "o#cls")"; mkdir -p "$CK/pkg/tests/input"; for i in $(seq 1 100); do : > "$CK/pkg/tests/input/t$i"; done
+: > "$CK/pkg/conf"
+printf '#x\nTL[c]=.3\nTL[py3]=1.2\nTL[default]=.3\n# Kattis\ndeclare -A TLKATTIS\nTLKATTIS[c]=1\nTLKATTIS[default]=1\n' > "$CK/pkg/tl.t1"
+printf 'abcdef12' > "$CK/.tl_checksum"
+TC='{"class":"x86_64|Xeon|28|252","checksum":"abcdef12","hosts":["judge","judge-sp1"],"tl":{"c":"0.4","py":"1.1","default":"0.4"},"tl_kattis":{"c":"2","default":"1"}}'
+eff(){ ( declare -A TL TLKATTIS; source "$1" 2>/dev/null; printf '%s %s %s %s' "${TL[c]}" "${TL[default]}" "${TL[py]:-${TL[py3]}}" "${TLKATTIS[c]}" ); }
+out="$(_tl_job_file "$CK/pkg" "$CK" "$TC" "$W/tl.job")"; DBG="$(cat "$W/tl.job" 2>/dev/null)"
+ck "classe maior: sai a tabela do job"          '[[ "$out" == "$W/tl.job" && -s "$W/tl.job" ]]'
+ck "o source fica com o MAIOR por chave: c 0,4, default 0,4, py 1,2 (a medição local vence a classe menor), Kattis c 2" '[[ "$(eff "$W/tl.job")" == "0.4 0.4 1.2 2" ]]'
+ck "a tabela local fica intocada"               '[[ "$(eff "$CK/pkg/tl.t1")" == ".3 .3 1.2 1" ]]'
+ck "_job_cap pela tabela do job (0,4 × 100 testes) > pela local (0,3)" '[[ "$(_job_cap "$CK/pkg" c moj "$W/tl.job")" == 610 && "$(_job_cap "$CK/pkg" c moj)" == 590 ]]'
+rm -f "$W/tl.job"; printf 'fedcba98' > "$CK/.tl_checksum"
+out="$(_tl_job_file "$CK/pkg" "$CK" "$TC" "$W/tl.job")"
+ck "tl_checksum diferente (classe de outra versão): a local" '[[ -z "$out" && ! -e "$W/tl.job" ]]'
+printf 'abcdef12' > "$CK/.tl_checksum"
+out="$(_tl_job_file "$CK/pkg" "$CK" '{"checksum":"abcdef12","hosts":["judge"],"tl":{"c":".2","default":".1"}}' "$W/tl.job")"
+ck "classe menor em tudo: nada a subir, a local" '[[ -z "$out" && ! -e "$W/tl.job" ]]'
+out="$(_tl_job_file "$CK/pkg" "$CK" "" "$W/tl.job")"
+ck "job sem tl_class (servidor antigo): a local" '[[ -z "$out" ]]'
+EVIL='{"checksum":"abcdef12","hosts":["a\nTL[c]=99","b;touch '"$W"'/pwn0"],"tl":{"c]=1;touch '"$W"'/pwn1;#":"5","java":"$(touch '"$W"'/pwn2)","cpp":"7"}}'
+out="$(_tl_job_file "$CK/pkg" "$CK" "$EVIL" "$W/tl.job")"; DBG="$(cat "$W/tl.job" 2>/dev/null)"
+v="$(eff "$W/tl.job")"; ( declare -A TL TLKATTIS; source "$W/tl.job" 2>/dev/null )
+ck "chave/valor/juiz fora do formato não entram; só o cpp=7 válido" '[[ "$(grep -c "^TL\[" "$W/tl.job")" == 4 && "$(grep -c "^TL\[cpp\]=7$" "$W/tl.job")" == 1 && "${v%% *}" == .3 ]]'
+ck "…e o source não executou nada"              '[[ ! -e "$W/pwn0" && ! -e "$W/pwn1" && ! -e "$W/pwn2" ]]'
+rm -f "$W/tl.job"
+
+# ponta a ponta: o run_job passa a tabela do job ao build-and-test (MOJ_TLFILE) e o tl_used do result é o da classe
+# (o run_job de verdade: os testes de despacho, lá em cima, o trocaram por um falso)
+source <(sed -n '/^run_job() {/,/^}/p' "$JD/agent/moj-agent.sh")
+cat > "$W/mt/build-and-test.sh" <<'EOB'
+#!/bin/bash
+# build-and-test FALSO: a seleção de tabela do de verdade (MOJ_TLFILE › tl.<host> › tl) e o TL da linguagem
+TLFILE="$3/tl"; [[ -e "$3/tl.$HOSTNAME" ]] && TLFILE="$3/tl.$HOSTNAME"
+[[ -n "${MOJ_TLFILE:-}" && -e "${MOJ_TLFILE:-}" ]] && TLFILE="$MOJ_TLFILE"
+declare -A TL TLKATTIS; source "$TLFILE"
+w="$(mktemp -d)"; printf "TL_LANG='%s'\n" "${TL[$1]:-${TL[default]}}" > "$w/report.env"
+echo "bat tlfile=$(basename "${MOJ_TLFILE:-SEM}") tl=${TL[$1]:-${TL[default]}}" >> "$CAL_LOG"
+echo "$w"; echo "Accepted,100p"
+EOB
+printf '{"id":"o#cls","checksum":"cks1","tl_reported":true}' > "$CK/.moj-cache.json"
+: > "$FAKE_ROUTES"; route '^/judge/result ' 200 '{"success":true}'
+_api_get(){ printf '{"exists":true,"checksum":"cks1","tl_checksum":"abcdef12"}'; }
+JOBJ="$(jq -cn --argjson tc "$TC" '{id:"jc1", contest:"sp", problem_id:"o#cls", login:"aluno", lang:"c", filename:"a.c", code_b64:"aQ==", tl_method:"moj", tl_class:$tc}')"
+: > "$CAL_LOG"; : > "$FAKE_LOG"; mkdir -p "$W/tj"
+( TMPDIR="$W/tj"; run_job "$JOBJ" "" ); DBG="$(cat "$CAL_LOG") | $(cat "$FAKE_LOG")"
+ck "run_job: o build-and-test julgou pela tabela do job (c = 0,4)" 'grep -qx "bat tlfile=tl.job tl=0.4" "$CAL_LOG"'
+ck "…e o result leva tl_used 0,4"               '[[ "$(jq -r .tl_used "$FAKE_LOG.body._judge_result" 2>/dev/null)" == 0.4 ]]'
+JOBJ="$(jq -c 'del(.tl_class) | .id = "jc2"' <<<"$JOBJ")"; : > "$CAL_LOG"
+( TMPDIR="$W/tj"; run_job "$JOBJ" "" ); DBG="$(cat "$CAL_LOG")"
+ck "job sem tl_class: a tabela local, sem MOJ_TLFILE (c = 0,3)" 'grep -qx "bat tlfile=SEM tl=.3" "$CAL_LOG"'
 unset -f sleep
 
 echo; echo "RESULT: $pass passed, $fail failed"

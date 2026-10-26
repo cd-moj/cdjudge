@@ -68,6 +68,13 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     tabela sem a metade Kattis recalibra (rápido) antes de julgar (`_tl_has_method`; não exige se o mojtools local
     não tem o `tl-methods.sh`). `_calib_cap` da full orça o piso de pass/slow/wrong (b × ⌈a × CALIBRATIONTL⌉,
     teto 30 s por teste).
+  - **Juízes idênticos, mesmo TL (26/10/2026)**: o job traz `tl_class` (o máx, por linguagem, entre os juízes da
+    mesma classe de hardware — o servidor deriva a classe dos specs do register). `_tl_job_file` grava `tl.job` no
+    dir do job = a tabela local + uma linha por chave em que a classe é MAIOR (o `source` fica com a última; nunca
+    abaixo da medição deste juiz), só com o MESMO `tl_checksum` (o `ensure_cached` grava `<cache>/<id>/.tl_checksum`
+    do package-meta). Vai ao build-and-test por `MOJ_TLFILE` e ao `_job_cap` (4º arg). O 3º arg é SÓ o `tl_class`
+    (o job leva o código em base64: >128 KiB num argumento do jq); chave/valor/host fora do formato não entram
+    (o arquivo é `source`ado). Sem classe, servidor antigo ou checksum diferente: a tabela local.
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports, o
     campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
     via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;
