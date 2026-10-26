@@ -314,5 +314,18 @@ ck "job kattis com tabela antiga: recalibra (rápido) e devolve o pacote" '[[ "$
 out="$(ensure_cached "o#kt" 0 0 0 kattis)"
 ck "…e o próximo job kattis não recalibra mais" '[[ "$out" == "$CD/pkg" && "$(grep -c calib "$CAL_LOG")" == 1 ]]'
 
+echo "== a calibração disparada por um JOB não herda o MOJ_RELEASE_FILE (26/10/2026) =="
+# o job de P grupos traz o arquivo de liberação; a calibração que ele dispara não pode anotar grupos
+# como livres (o laço os devolveria ao escalonador com o job ainda julgando neles)
+cat > "$W/mt/calibreitor.sh" <<'EOC'
+echo "calib rel=${MOJ_RELEASE_FILE:-SEM}" >> "$CAL_LOG"
+printf 'TL[c]=.3035\nTL[default]=.3035\n' > "$1/tl.$HOSTNAME"
+EOC
+: > "$CAL_LOG"
+CR="$(cache_id_dir "o#rel")"; mkdir -p "$CR/pkg/tests/input"; : > "$CR/pkg/tests/input/t1"; : > "$CR/pkg/conf"
+printf '{"id":"o#rel","checksum":"cks1"}' > "$CR/.moj-cache.json"
+out="$(MOJ_RELEASE_FILE="$W/released" ensure_cached "o#rel" 0 0 0 moj)"; DBG="$(cat "$CAL_LOG")"
+ck "calibrou sem o MOJ_RELEASE_FILE no ambiente" '[[ "$out" == "$CR/pkg" ]] && grep -qx "calib rel=SEM" "$CAL_LOG"'
+
 echo; echo "RESULT: $pass passed, $fail failed"
 (( fail == 0 ))

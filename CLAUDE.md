@@ -55,6 +55,10 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     `$TMPDIR/released` do primário (índices de grupo que o b-a-t anotou; append-only, idempotente
     via `SLOT_RELEASED`) e solta os slots que só grupos liberados usam (grupo 0 nunca; partition
     numa: slot com grupo vivo fica). Job sem `test_cpus` (servidor antigo) = caminho de sempre.
+    **A calibração NUNCA libera grupo** (26/10/2026): o calibreitor roda sob `env -u MOJ_RELEASE_FILE`
+    (e o mojtools novo também a tira). A disparada DENTRO de um job de P grupos herdava o arquivo, os
+    build-and-test dela anotavam os grupos ≥ 1 e o laço devolvia ao escalonador os slots que o job ainda
+    ia usar — CPU disputada, TLE espúrio no 1º envio depois de recalibrar.
     Register manda `slot_cpus` (menor slot), `slots_by_node`, `smt`; heartbeat manda `slot_cpus` e
     `max_free_group` (maior nº de slots livres num nó).
   - **Métodos de TL (26/10/2026)**: a tabela `tl.<host>` leva `TL[]` (MOJ) e `TLKATTIS[]` (Kattis por

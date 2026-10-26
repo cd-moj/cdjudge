@@ -353,11 +353,15 @@ ensure_cached() {
       local _ccap _crc
       _ccap="$(_calib_cap "$cdir/pkg" "$full")"
       _slot_deadline "$_ccap"
+      # sem o MOJ_RELEASE_FILE (26/10/2026): a calibração disparada por um JOB herdava o arquivo de liberação
+      # dele, e os build-and-test da calibração anotavam os grupos ≥ 1 como livres — o laço principal os
+      # devolvia ao escalonador enquanto o job ainda ia julgar neles (CPU disputada, TLE espúrio no 1º envio
+      # depois de recalibrar). O calibreitor novo também tira a variável; aqui vale p/ o mojtools antigo.
       if [[ "$full" == 1 ]]; then
-        MOJ_PROBLEM_ID="$id" \
+        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       else
-        MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 \
+        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       fi
       _crc=$?
