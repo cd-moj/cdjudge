@@ -81,8 +81,9 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     (o job leva o código em base64: >128 KiB num argumento do jq); chave/valor/host fora do formato não entram
     (o arquivo é `source`ado). Sem classe, servidor antigo ou checksum diferente: a tabela local.
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports (TODOS os report.html
-    até `AGENT_REPORT_MAX_BYTES` por arquivo e `AGENT_REPORTS_MAX_BYTES` no total — o que não cabe é pulado, os
-    seguintes ainda entram, e sai no log; o teto era 12 POR CONTAGEM e o olamundo perdia os 3 últimos), o
+    até `AGENT_REPORT_MAX_BYTES` (10 MB) por arquivo e `AGENT_REPORTS_MAX_BYTES` (50 MB) no total — o que não cabe é
+    pulado, os seguintes ainda entram, e sai no log; o teto era 12 POR CONTAGEM e 500 KB por arquivo: o olamundo
+    perdia os 3 últimos e 22% dos reports nunca subiam; o `_api_file` dá 60 s + 2 s/MB ao curl), o
     campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
     via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;
     pkg presente SEM o arquivo remove a cópia (nunca re-enviar dado velho). O `_job_cap`

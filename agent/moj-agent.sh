@@ -37,12 +37,13 @@ mkdir -p "$JUDGE_CACHE" 2>/dev/null
 # vazia, e o calibreitor roda as soluções do mesmo tipo em paralelo, uma por grupo. 0 = desliga aqui (a calibração
 # volta a 1 grupo; o calibreitor também recebe MOJ_CALIB_LANES=0, inclusive a disparada por um job).
 : "${AGENT_CALIB_LANES:=1}"
-# REPORTS DA CALIBRAÇÃO (26/10/2026): o report.html de CADA solução vai ao servidor até AGENT_REPORTS_MAX_BYTES no
-# total (6 MB = o pior caso do teto antigo, 12 × 500 KB) e AGENT_REPORT_MAX_BYTES por arquivo; o que fica de fora
-# sai no log. O teto era 12 POR CONTAGEM: o olamundo (15 soluções de 8,5 KB) perdia os 3 últimos em ordem
-# alfabética (a .pas, a .rs e a slow) e o editor ficava sem o link do report deles.
-: "${AGENT_REPORT_MAX_BYTES:=500000}"
-: "${AGENT_REPORTS_MAX_BYTES:=6000000}"
+# REPORTS DA CALIBRAÇÃO (26/10/2026): o report.html de CADA solução vai ao servidor até AGENT_REPORT_MAX_BYTES por
+# arquivo (10 MB) e AGENT_REPORTS_MAX_BYTES no total da calibração (50 MB); o que fica de fora sai no log. O teto era
+# 12 POR CONTAGEM e 500 KB por arquivo: o olamundo (15 soluções de 8,5 KB) perdia os 3 últimos em ordem alfabética
+# (a .pas, a .rs e a slow), e 22% dos reports (os de teste grande) nunca subiam. Decisão do Ribas: 10 MB. No cache da
+# .11, o total por problema tem p99 de 20 MB (um só passa de 50 MB). O servidor grava sem ler o base64 no bash.
+: "${AGENT_REPORT_MAX_BYTES:=10000000}"
+: "${AGENT_REPORTS_MAX_BYTES:=50000000}"
 # Config de partição APLICADA persiste aqui (P6): um restart re-adota exatamente o que rodava
 # (o agent.env é só o último fallback — make config o regrava e já causou o wedge C5).
 AGENT_STATE="${AGENT_STATE:-$(dirname "$JUDGE_CACHE")/agent-state.json}"
@@ -132,7 +133,10 @@ _api_get() {  # _api_get <path> -> corpo no stdout
 _api_file() {  # _api_file <path> <bodyfile> : POST com o corpo vindo de ARQUIVO. Obrigatório p/
   # payloads grandes (report.html em base64): um ÚNICO arg >128KB estoura MAX_ARG_STRLEN
   # ("Argument list too long") e o POST se perdia em silêncio. Re-tenta como o _api.
-  _api_ex 60 "$1" --data-binary "@$2"
+  # O teto do curl cresce com o corpo (60 s + 2 s por MB): os reports da calibração chegam a ~67 MB em base64, e um
+  # timeout aqui re-enviaria tudo. Corpo pequeno (o result de um job) segue com os 60 s de sempre.
+  local mb=$(( $(stat -c%s "$2" 2>/dev/null || echo 0) / 1048576 ))
+  _api_ex $(( 60 + 2 * mb )) "$1" --data-binary "@$2"
 }
 _api_get_file() {  # _api_get_file <path> <outfile> -> baixa (rc!=0 em erro)
   curl -fsS -m 180 "${_HH[@]}" "${_AUTH[@]}" -o "$2" "$MOJ_API$1" 2>/dev/null

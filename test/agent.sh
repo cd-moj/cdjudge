@@ -528,7 +528,7 @@ ck "…e nada no log de pulados"                     '[[ ! -s "$ALOG" ]]'
 # um report acima do teto POR ARQUIVO e o orçamento TOTAL: o que não cabe é pulado, os seguintes ainda entram, o log diz quais
 head -c 600000 /dev/zero | tr '\0' y > "$RP/pkg/.calib-reports/good-big.c.html"
 head -c 100 /dev/zero | tr '\0' z > "$RP/pkg/.calib-reports/slow-z.c.html"
-AGENT_REPORTS_MAX_BYTES=100000 report_calib_log "o#rp" "cks1" "$RP/.calib.log" "$RP/pkg"; DBG="$(jq -c '[.reports[].name]' "$W/rp.body") | $(cat "$ALOG")"
+AGENT_REPORT_MAX_BYTES=500000 AGENT_REPORTS_MAX_BYTES=100000 report_calib_log "o#rp" "cks1" "$RP/.calib.log" "$RP/pkg"; DBG="$(jq -c '[.reports[].name]' "$W/rp.body") | $(cat "$ALOG")"
 ck "teto por arquivo: o de 586 KB fica de fora"   '! jq -e ".reports[] | select(.name == \"good-big.c\")" "$W/rp.body" >/dev/null'
 ck "orçamento de 100 KB: os 12 primeiros pequenos cabem, os 3 seguintes não" '[[ "$(jq -c "[.reports[].name | select(startswith(\"good-s\"))] | [length, .[-1]]" "$W/rp.body")" == "[12,\"good-s12.c\"]" ]]'
 ck "…e o que vem depois e cabe ainda entra (pula, não para)" 'jq -e ".reports[-1].name == \"slow-z.c\"" "$W/rp.body" >/dev/null'
@@ -537,6 +537,16 @@ ck "o log diz o que ficou de fora e o tamanho"      'grep -q "4 report(s) fora d
 report_calib_log "o#rp" "cks1" "$RP/.calib.log"
 ck "sem o pkg: reports vazio, corpo válido"         'jq -e "(.reports == []) and (.id == \"o#rp\")" "$W/rp.body" >/dev/null'
 ck "nenhum temporário sobra"                        '[[ "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -newer "$RP/.calib.log" -name "tmp.*" -type f 2>/dev/null | wc -l)" == 0 ]]'
+# os tetos PADRÃO (decisão do Ribas, 26/10/2026): 10 MB por report e 50 MB por calibração — o de 586 KB agora vai
+ck "tetos padrão: 10 MB por report, 50 MB por calibração" '[[ "$AGENT_REPORT_MAX_BYTES" == 10000000 && "$AGENT_REPORTS_MAX_BYTES" == 50000000 ]]'
+: > "$ALOG"; report_calib_log "o#rp" "cks1" "$RP/.calib.log" "$RP/pkg"; DBG="$(jq -c '[.reports[].name]' "$W/rp.body") | $(cat "$ALOG")"
+ck "com o padrão o de 586 KB vai, e todos os 17"    '[[ "$(jq "[.reports[].name] | (length == 17 and index(\"good-big.c\") != null)" "$W/rp.body")" == true && ! -s "$ALOG" ]]'
+# o teto do curl do _api_file cresce com o corpo (60 s + 2 s/MB): um timeout re-enviaria ~67 MB inteiros
+source <(sed -n '/^_api_file() {/,/^}/p' "$JD/agent/moj-agent.sh")
+_api_ex(){ APITO="$1"; return 0; }
+head -c 5242880 /dev/zero > "$W/b5m"; printf '{}' > "$W/b0"
+_api_file /judge/calib-report "$W/b5m"; T5="$APITO"; _api_file /judge/result "$W/b0"; T0="$APITO"; DBG="$T5 $T0"
+ck "_api_file: 5 MB = 70 s de teto; corpo pequeno = 60 s" '[[ "$T5" == 70 && "$T0" == 60 ]]'
 alog(){ :; }
 unset -f sleep
 
