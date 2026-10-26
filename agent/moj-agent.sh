@@ -33,6 +33,10 @@ mkdir -p "$JUDGE_CACHE" 2>/dev/null
 # AGENT_LOCK_WAIT limita a espera no flock por-problema (fila atrás de calibração).
 : "${AGENT_HARD_TL_FALLBACK:=1800}"
 : "${AGENT_LOCK_WAIT:=3600}"
+# RAIAS DA CALIBRAÇÃO (26/10/2026): o servidor dá à calibração `par_max` grupos de CPU quando há slot livre e fila
+# vazia, e o calibreitor roda as soluções do mesmo tipo em paralelo, uma por grupo. 0 = desliga aqui (a calibração
+# volta a 1 grupo; o calibreitor também recebe MOJ_CALIB_LANES=0, inclusive a disparada por um job).
+: "${AGENT_CALIB_LANES:=1}"
 # Config de partição APLICADA persiste aqui (P6): um restart re-adota exatamente o que rodava
 # (o agent.env é só o último fallback — make config o regrava e já causou o wedge C5).
 AGENT_STATE="${AGENT_STATE:-$(dirname "$JUDGE_CACHE")/agent-state.json}"
@@ -449,11 +453,13 @@ ensure_cached() {
       # dele, e os build-and-test da calibração anotavam os grupos ≥ 1 como livres — o laço principal os
       # devolvia ao escalonador enquanto o job ainda ia julgar neles (CPU disputada, TLE espúrio no 1º envio
       # depois de recalibrar). O calibreitor novo também tira a variável; aqui vale p/ o mojtools antigo.
+      # MOJ_CALIB_LANES: o interruptor das raias do calibreitor (os grupos do MOJ_CPU_GROUPS viram raias; a
+      # calibração disparada por um job usa os grupos dele) — AGENT_CALIB_LANES=0 desliga também aqui
       if [[ "$full" == 1 ]]; then
-        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" \
+        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" MOJ_CALIB_LANES="${AGENT_CALIB_LANES:-1}" \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       else
-        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" CALIBRATE_ONLY_GOOD=1 \
+        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" MOJ_CALIB_LANES="${AGENT_CALIB_LANES:-1}" CALIBRATE_ONLY_GOOD=1 \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       fi
       _crc=$?
@@ -1414,7 +1420,9 @@ _dispatch_wide() {
     return 0
   fi
   local ny=n; [[ "$numa" == true ]] && ny=y
-  [[ "$kind" == job ]] || { par=1; cap=1; }   # calibração: um teste por vez, largura k
+  # calibração: um teste por vez em k CPUs; os `par_max` grupos que o servidor der viram RAIAS (soluções em
+  # paralelo) — só com o calibreitor que as tem (o nome MOJ_CALIB_LANES no arquivo) e AGENT_CALIB_LANES≠0
+  [[ "$kind" == job ]] || { _calib_lanes_ok || par=1; cap=$par; }
   if ! alloc_slots "$tc" "$par" "$ny" "$cap"; then
     _decline "$kind" "$j" "sem $tc cpu(s) livres$([[ "$ny" == y ]] && printf ' num nó NUMA')"
     return 1
@@ -1435,6 +1443,11 @@ _dispatch_wide() {
   esac
   alog "$kind reivindicado $label -> slots ${ALLOC_SLOTS[*]} (k=$tc, $P grupo(s)${gs:+: $gs}) pid $pid"
   return 0
+}
+
+# _calib_lanes_ok : esta calibração pode usar raias? (o calibreitor local as tem e o operador não desligou)
+_calib_lanes_ok() {
+  [[ "${AGENT_CALIB_LANES:-1}" != 0 ]] && grep -q MOJ_CALIB_LANES "$MOJTOOLS_DIR/calibreitor.sh" 2>/dev/null
 }
 
 moj_agent_main() {

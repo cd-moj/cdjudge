@@ -188,6 +188,10 @@ Ele **não cresce para sempre**:
 
 O sweep respeita o flock por-problema e pula download em curso, então não atropela julgamento.
 
+**Calibração em raias.** Com slot livre e fila vazia, o servidor dá à calibração vários grupos de CPU, e o
+calibreitor roda as soluções do mesmo tipo em paralelo, uma por grupo. `AGENT_CALIB_LANES=0` no `agent.env`
+desliga (a calibração volta a usar 1 grupo).
+
 **Juízes idênticos, mesmo tempo-limite.** O servidor agrupa os juízes por classe de hardware (processador,
 número de CPUs e memória, do `register`). Cada job traz o maior tempo-limite entre os juízes da classe
 (`tl_class`), e o agente julga pelo maior entre ele e a própria tabela. Assim, o veredicto não depende de qual

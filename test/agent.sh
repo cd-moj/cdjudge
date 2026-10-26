@@ -262,6 +262,26 @@ DBG="$(cat "$LOG")"
 ck "não coube ⇒ decline com id e rc 1"         '[[ $rc == 1 ]] && grep -q "api /judge/decline" "$LOG" && grep -q "\"id\":\"j7\"" "$LOG" && grep -q "sem 2 cpu(s) livres" "$LOG"'
 agent_slots_kill teste >/dev/null; for i in "${!SLOT_PID[@]}"; do SLOT_PID[i]=0; done
 
+echo "== raias da calibração (26/10/2026): o par_max do servidor vira grupos só com o calibreitor que as tem =="
+mkdir -p "$W/mt"; printf '# MOJ_CALIB_LANES: raias\n' > "$W/mt/calibreitor.sh"
+: > "$LOG"
+_dispatch_wide update '{"reqid":"r2","kind":"calibrate","target":"o#p","test_cpus":1,"same_numa":false,"par_max":3,"par_cap":3}'
+sleep 0.3; DBG="$(cat "$LOG")"
+ck "calibreitor com raias + par_max 3: 3 grupos de 1 CPU, MOJ_PARALLEL 1" 'grep -Eq "run_update reqid=r2 pin=[0-9,]+ k=1 P=1 groups=[0-9]+\|[0-9]+\|[0-9]+$" "$LOG"'
+_reap_slots; ck "…e ocupa 3 slots até o fim"   '[[ "$FREE" == $((N_SLOTS-3)) ]]'
+agent_slots_kill teste >/dev/null; for i in "${!SLOT_PID[@]}"; do SLOT_PID[i]=0; done
+: > "$W/mt/calibreitor.sh"; : > "$LOG"
+_dispatch_wide update '{"reqid":"r3","kind":"calibrate","target":"o#p","test_cpus":1,"same_numa":false,"par_max":3,"par_cap":3}'
+sleep 0.3; DBG="$(cat "$LOG")"
+ck "calibreitor SEM raias (mojtools antigo): 1 grupo" 'grep -Eq "run_update reqid=r3 pin=[0-9]+ k=1 P=1 groups=[0-9]+$" "$LOG"'
+agent_slots_kill teste >/dev/null; for i in "${!SLOT_PID[@]}"; do SLOT_PID[i]=0; done
+printf '# MOJ_CALIB_LANES: raias\n' > "$W/mt/calibreitor.sh"; : > "$LOG"
+AGENT_CALIB_LANES=0 _dispatch_wide update '{"reqid":"r4","kind":"calibrate","target":"o#p","test_cpus":1,"same_numa":false,"par_max":3,"par_cap":3}'
+sleep 0.3; DBG="$(cat "$LOG")"
+ck "AGENT_CALIB_LANES=0: 1 grupo"               'grep -Eq "run_update reqid=r4 pin=[0-9]+ k=1 P=1 groups=[0-9]+$" "$LOG"'
+agent_slots_kill teste >/dev/null; for i in "${!SLOT_PID[@]}"; do SLOT_PID[i]=0; done
+rm -f "$W/mt/calibreitor.sh"
+
 echo "== local que usa a variável declarada na MESMA linha (28/09/2026: o agente morria com job rodando) =="
 # o bash expande todas as palavras do `local` antes de atribuir: `local p="$1" f="${SLOT_TMP[p]}"` lia um `p`
 # inexistente e, sob `set -u`, matava o agente. Aqui as funções rodam num bash LIMPO (sem p/i globais, que o
@@ -319,14 +339,18 @@ echo "== a calibração disparada por um JOB não herda o MOJ_RELEASE_FILE (26/1
 # o job de P grupos traz o arquivo de liberação; a calibração que ele dispara não pode anotar grupos
 # como livres (o laço os devolveria ao escalonador com o job ainda julgando neles)
 cat > "$W/mt/calibreitor.sh" <<'EOC'
-echo "calib rel=${MOJ_RELEASE_FILE:-SEM}" >> "$CAL_LOG"
+echo "calib rel=${MOJ_RELEASE_FILE:-SEM} lanes=${MOJ_CALIB_LANES:-SEM}" >> "$CAL_LOG"
 printf 'TL[c]=.3035\nTL[default]=.3035\n' > "$1/tl.$HOSTNAME"
 EOC
 : > "$CAL_LOG"
 CR="$(cache_id_dir "o#rel")"; mkdir -p "$CR/pkg/tests/input"; : > "$CR/pkg/tests/input/t1"; : > "$CR/pkg/conf"
 printf '{"id":"o#rel","checksum":"cks1"}' > "$CR/.moj-cache.json"
 out="$(MOJ_RELEASE_FILE="$W/released" ensure_cached "o#rel" 0 0 0 moj)"; DBG="$(cat "$CAL_LOG")"
-ck "calibrou sem o MOJ_RELEASE_FILE no ambiente" '[[ "$out" == "$CR/pkg" ]] && grep -qx "calib rel=SEM" "$CAL_LOG"'
+ck "calibrou sem o MOJ_RELEASE_FILE no ambiente; o interruptor das raias chega ao calibreitor" '[[ "$out" == "$CR/pkg" ]] && grep -qx "calib rel=SEM lanes=1" "$CAL_LOG"'
+CR2="$(cache_id_dir "o#rel2")"; mkdir -p "$CR2/pkg/tests/input"; : > "$CR2/pkg/tests/input/t1"; : > "$CR2/pkg/conf"
+printf '{"id":"o#rel2","checksum":"cks1"}' > "$CR2/.moj-cache.json"; : > "$CAL_LOG"
+out="$(AGENT_CALIB_LANES=0 ensure_cached "o#rel2" 0 0 0 moj)"; DBG="$(cat "$CAL_LOG")"
+ck "AGENT_CALIB_LANES=0 chega como MOJ_CALIB_LANES=0 (a calibração disparada por job também)" 'grep -qx "calib rel=SEM lanes=0" "$CAL_LOG"'
 
 echo "== problema apagado: o 404 problem_gone é definitivo — não repete, marca, o boot pula, o GC apaga (26/10/2026) =="
 # o servidor responde 404 `problem_gone` ao report de problema que não existe mais; antes o agente repetia TODO

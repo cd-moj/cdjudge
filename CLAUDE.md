@@ -59,6 +59,11 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     (e o mojtools novo também a tira). A disparada DENTRO de um job de P grupos herdava o arquivo, os
     build-and-test dela anotavam os grupos ≥ 1 e o laço devolvia ao escalonador os slots que o job ainda
     ia usar — CPU disputada, TLE espúrio no 1º envio depois de recalibrar.
+    **Raias da calibração (26/10/2026)**: a calibração aceita os `par_max` grupos que o servidor der (com slot livre
+    e fila vazia; teto `CALIB_PAR_MAX` lá) só se o calibreitor local tem raias (`_calib_lanes_ok`: o nome
+    `MOJ_CALIB_LANES` no `calibreitor.sh`) e `AGENT_CALIB_LANES≠0`; senão 1 grupo, como antes. Os grupos ficam
+    presos até o fim (sem liberação de cauda). O calibreitor recebe `MOJ_CALIB_LANES=$AGENT_CALIB_LANES` nas duas
+    chamadas (a disparada por job usa os grupos do job como raias).
     Register manda `slot_cpus` (menor slot), `slots_by_node`, `smt`; heartbeat manda `slot_cpus` e
     `max_free_group` (maior nº de slots livres num nó).
   - **Métodos de TL (26/10/2026)**: a tabela `tl.<host>` leva `TL[]` (MOJ) e `TLKATTIS[]` (Kattis por
