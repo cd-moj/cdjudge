@@ -145,10 +145,20 @@ por-problema, default 3600s). O scratch de cada job vive num **TMPDIR próprio**
 default `/tmp/moj-agent-work.<host>/s<slot>.<epoch>.<rand>`) removido no fim — slots nunca
 compartilham diretório de escrita.
 
+**Os dois métodos de TL (26/10/2026; mojtools `tl-methods.sh`, formato em `cdmoj/docs/PACOTE.md` "Métodos de
+TL"):** a tabela `tl.<host>` que o calibreitor grava leva as DUAS metades — `TL[]` (o método MOJ) e
+`TLKATTIS[]` (o do Kattis, por linguagem) — e o agente reporta as duas no `/judge/tl-report` (`tl` e
+`tl_kattis`). Quem escolhe a metade de cada julgamento é o **job**: o servidor põe `tl_method` (`moj`|`kattis`,
+lido do conf ATUAL do problema) e o agente o repassa ao build-and-test (`MOJ_TL_METHOD`) e ao teto de
+wall-clock (`_job_cap`, que também soma o `TLMOD` sum/mult — o TL Kattis costuma ser bem maior que o MOJ). Job
+`kattis` com uma tabela SEM a metade Kattis (calibrada por um mojtools anterior) **recalibra (rápido) antes de
+julgar** — nunca julga pela tabela errada. Na calibração completa, pass/slow/wrong rodam até o piso dos dois
+métodos (até 30 s por teste), e o `_calib_cap` orça isso.
+
 **Teste do agente (sem rede, sem jaula):** `make test` (= `bash test/agent.sh`) exercita as funções
 sourced — fatiamento por nó NUMA, `_kill_tree` contra uma árvore com `timeout`, o teto de wall-clock
-imposto pelo laço, o lote despachado no beat que traz `config`, config igual adotada sem drenar e o
-re-registro pedido por um slot.
+imposto pelo laço, o lote despachado no beat que traz `config`, config igual adotada sem drenar, o
+re-registro pedido por um slot e os métodos de TL (as duas metades da tabela, os tetos e a auto-cura).
 
 ## O cache de pacotes (e como ele se limpa)
 

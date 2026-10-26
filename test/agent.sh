@@ -269,5 +269,50 @@ F="$(mktemp)"; sed -n '/^_release_tail() {/,/^}/p; /^_report_slot_killed() {/,/^
 out="$(bash -c 'set -u; declare -a SLOT_TMP SLOT_ALLOC SLOT_RELEASED SLOT_KIND SLOT_META; SLOT_TMP[3]=/nao/existe; SLOT_ALLOC[3]="3|4"; SLOT_RELEASED[3]=" "; source "$1"; _release_tail 3 && _report_slot_killed 3 teste && echo ok' _ "$F" 2>&1)"; rm -f "$F"
 DBG="$out"; ck "_release_tail e _report_slot_killed rodam sob set -u sem p/i globais" '[[ "$out" == ok ]]'
 
+echo "== métodos de TL (26/10/2026): a tabela com as metades MOJ e Kattis, tetos e auto-cura =="
+# a tabela nova do calibreitor (mojtools tl-methods.sh) e uma de antes (só TL[])
+TN="$W/tlnovo"; printf '#x\nTL[c]=.3035\nTL[default]=.3035\n# Kattis\ndeclare -A TLKATTIS\nTLKATTIS[c]=3\nTLKATTIS[default]=3\n' > "$TN"
+TV="$W/tlvelho"; printf 'TL[c]=.3035\nTL[default]=.3035\n' > "$TV"
+DBG="$(tl_to_json "$TN") $(tl_to_json "$TN" TLKATTIS)"
+ck "tl_to_json: as duas metades da tabela nova"  '[[ "$(tl_to_json "$TN" | jq -c .)" == "{\"c\":\".3035\",\"default\":\".3035\"}" && "$(tl_to_json "$TN" TLKATTIS | jq -c .)" == "{\"c\":\"3\",\"default\":\"3\"}" ]]'
+ck "tabela antiga: metade Kattis vazia, sem morrer" '[[ "$(tl_to_json "$TV" TLKATTIS)" == "{}" && "$(tl_to_json "$TV" | jq -r .c)" == ".3035" ]]'
+mkdir -p "$W/mt"; : > "$W/mt/tl-methods.sh"
+ck "_tl_has_method: kattis exige a metade nova"  '_tl_has_method "$TN" kattis && ! _tl_has_method "$TV" kattis && _tl_has_method "$TV" moj && _tl_has_method "$TV" ""'
+rm -f "$W/mt/tl-methods.sh"
+ck "…e não exige com mojtools sem tl-methods.sh (recalibrar não a criaria)" '_tl_has_method "$TV" kattis'
+: > "$W/mt/tl-methods.sh"
+# _job_cap: 100 testes; o Kattis (3 s) dá teto maior que o MOJ (0,3035 s)
+PK="$W/pkgcap"; mkdir -p "$PK/tests/input"; for i in $(seq 1 100); do : > "$PK/tests/input/t$i"; done
+cp "$TN" "$PK/tl.t1"; : > "$PK/conf"
+cm="$(_job_cap "$PK" c)"; ckt="$(_job_cap "$PK" c kattis)"
+DBG="moj=$cm kattis=$ckt"
+ck "_job_cap: moj = (0,3035+2,2)×100×2+90; kattis = (3+2,2)×100×2+90" '[[ "$cm" == 590 && "$ckt" == 1130 ]]'
+printf 'TLMETHOD=kattis\n' > "$PK/conf"
+ck "_job_cap: sem método no job, vale o TLMETHOD do conf; o job vence o conf" '[[ "$(_job_cap "$PK" c)" == 1130 && "$(_job_cap "$PK" c moj)" == 590 ]]'
+printf 'TLMETHOD=kattis\nTLMOD[c.mult]=2\n' > "$PK/conf"
+ck "_job_cap: TLMOD mult entra (Kattis 3 × 2 = 6)" '[[ "$(_job_cap "$PK" c)" == 1730 ]]'
+# _calib_cap: 10 testes × 2 soluções; full = piso do Kattis (1,5 × ⌈2 × 5⌉ + 0,5 = 15,5 s por teste)
+PC="$W/pkgcal"; mkdir -p "$PC/tests/input" "$PC/sols/good" "$PC/sols/slow"; for i in $(seq 1 10); do : > "$PC/tests/input/t$i"; done
+: > "$PC/sols/good/a.c"; : > "$PC/sols/slow/s.c"; : > "$PC/conf"
+cq="$(_calib_cap "$PC" 0)"; cf="$(_calib_cap "$PC" 1)"; DBG="rápida=$cq completa=$cf"
+ck "_calib_cap: rápida = 7,2 s/teste (só good: 7,2×10×1×2+30+120); completa = 15,5 s/teste" '[[ "$cq" == 300 && "$cf" == 800 ]]'
+printf 'KATTIS_TIME_LIMIT_TO_TLE=50\n' > "$PC/conf"
+ck "_calib_cap: o piso para em 30 s por teste" '[[ "$(_calib_cap "$PC" 1)" == 1380 ]]'
+# auto-cura: job kattis com tabela sem a metade Kattis recalibra (rápido) antes de julgar; moj não
+_api_get(){ printf '{"exists":true,"checksum":"cks1"}'; }
+cat > "$W/mt/calibreitor.sh" <<'EOC'
+echo "calib $*" >> "$CAL_LOG"
+printf 'TL[c]=.3035\nTL[default]=.3035\ndeclare -A TLKATTIS\nTLKATTIS[c]=3\nTLKATTIS[default]=3\n' > "$1/tl.$HOSTNAME"
+EOC
+export CAL_LOG="$W/cal.log"; : > "$CAL_LOG"
+CD="$(cache_id_dir "o#kt")"; mkdir -p "$CD/pkg/tests/input"; : > "$CD/pkg/tests/input/t1"; : > "$CD/pkg/conf"
+cp "$TV" "$CD/pkg/tl.t1"; printf '{"id":"o#kt","checksum":"cks1"}' > "$CD/.moj-cache.json"
+out="$(ensure_cached "o#kt" 0 0 0 moj)"
+ck "job moj com tabela antiga: cache válido, sem recalibrar" '[[ "$out" == "$CD/pkg" && ! -s "$CAL_LOG" ]]'
+out="$(ensure_cached "o#kt" 0 0 0 kattis)"; DBG="$(cat "$CAL_LOG") | $(cat "$CD/pkg/tl.t1")"
+ck "job kattis com tabela antiga: recalibra (rápido) e devolve o pacote" '[[ "$out" == "$CD/pkg" && "$(grep -c calib "$CAL_LOG")" == 1 ]] && grep -q "^TLKATTIS\[c\]=3" "$CD/pkg/tl.t1"'
+out="$(ensure_cached "o#kt" 0 0 0 kattis)"
+ck "…e o próximo job kattis não recalibra mais" '[[ "$out" == "$CD/pkg" && "$(grep -c calib "$CAL_LOG")" == 1 ]]'
+
 echo; echo "RESULT: $pass passed, $fail failed"
 (( fail == 0 ))

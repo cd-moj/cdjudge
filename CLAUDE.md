@@ -57,6 +57,13 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     numa: slot com grupo vivo fica). Job sem `test_cpus` (servidor antigo) = caminho de sempre.
     Register manda `slot_cpus` (menor slot), `slots_by_node`, `smt`; heartbeat manda `slot_cpus` e
     `max_free_group` (maior nº de slots livres num nó).
+  - **Métodos de TL (26/10/2026)**: a tabela `tl.<host>` leva `TL[]` (MOJ) e `TLKATTIS[]` (Kattis por
+    linguagem, mojtools `tl-methods.sh`); `tl_to_json <arq> [TLKATTIS]` e o `report_tl` mandam as duas (`tl`,
+    `tl_kattis`). O job traz `tl_method` (o servidor lê o conf ATUAL no claim): vai ao build-and-test
+    (`MOJ_TL_METHOD`), ao `_job_cap` (TLKATTIS + TLMOD sum/mult) e ao `ensure_cached` (5º arg): job `kattis` com
+    tabela sem a metade Kattis recalibra (rápido) antes de julgar (`_tl_has_method`; não exige se o mojtools local
+    não tem o `tl-methods.sh`). `_calib_cap` da full orça o piso de pass/slow/wrong (b × ⌈a × CALIBRATIONTL⌉,
+    teto 30 s por teste).
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports, o
     campo **`sols`** (o `.calib-sols.json` do calibreitor — por solução, teste a teste; ≤300 KB,
     via `--slurpfile`) com cópia em `<cache>/<id>/.calib-sols.json` p/ o re-envio de boot;

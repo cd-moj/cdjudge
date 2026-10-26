@@ -122,21 +122,34 @@ _uri() { jq -rn --arg s "$1" '$s|@uri'; }   # url-encode (id tem '#')
 # ----------------------------------------------------------------- cache de pacotes
 cache_id_dir() { printf '%s/%s' "$JUDGE_CACHE" "$(printf '%s' "$1" | tr '#/' '__')"; }
 
-# tl_to_json <tlfile> -> {lang:val} a partir do bash TL[lang]=val
+# tl_to_json <tlfile> [TL|TLKATTIS] -> {lang:val} de um array da tabela. A tabela leva as DUAS metades dos
+# métodos de TL (mojtools tl-methods.sh, 26/10/2026): TL[] = MOJ, TLKATTIS[] = Kattis por linguagem. O
+# `declare -A TLKATTIS` vem DENTRO do arquivo; o daqui cobre a tabela antiga (sem a metade Kattis = {}).
 tl_to_json() {
-  ( declare -A TL TLMOD; source "$1" 2>/dev/null
-    for k in "${!TL[@]}"; do printf '%s\t%s\n' "$k" "${TL[$k]}"; done ) \
+  local arr="${2:-TL}"
+  [[ "$arr" == TLKATTIS ]] || arr=TL
+  ( declare -A TL TLMOD TLKATTIS; source "$1" 2>/dev/null
+    declare -n _tla="$arr"
+    for k in "${!_tla[@]}"; do printf '%s\t%s\n' "$k" "${_tla[$k]}"; done ) \
   | jq -R -s -c 'split("\n")|map(select(length>0)|split("\t")|{(.[0]):.[1]})|add // {}'
 }
 
-# report_tl <id> <checksum> <pkgdir> : reporta ao MOJ o TL calibrado (tl.$AGENT_HOST).
+# _tl_has_method <tlfile> <moj|kattis|""> : a tabela serve o método pedido? Só o kattis exige a metade nova
+# (TLKATTIS[]); se o mojtools local ainda não sabe calibrar o Kattis, não exige (recalibrar não a criaria).
+_tl_has_method() {
+  [[ "${2:-}" == kattis && -f "$MOJTOOLS_DIR/tl-methods.sh" ]] || return 0
+  grep -q '^TLKATTIS\[' "$1" 2>/dev/null
+}
+
+# report_tl <id> <checksum> <pkgdir> : reporta ao MOJ o TL calibrado (tl.$AGENT_HOST) — as duas metades.
 report_tl() {
-  local id="$1" cks="$2" pkg="$3" tlf="$3/tl.$AGENT_HOST" tlj
+  local id="$1" cks="$2" pkg="$3" tlf="$3/tl.$AGENT_HOST" tlj tlk
   [[ -f "$tlf" ]] || tlf="$pkg/tl"
   [[ -f "$tlf" ]] || { alog "report_tl: sem tl p/ $id"; return 1; }
-  tlj="$(tl_to_json "$tlf")"
+  tlj="$(tl_to_json "$tlf")"; tlk="$(tl_to_json "$tlf" TLKATTIS)"
+  [[ -n "$tlj" ]] || tlj='{}'; [[ -n "$tlk" ]] || tlk='{}'
   _api /judge/tl-report "$(jq -cn --arg h "$AGENT_HOST" --arg id "$id" --arg c "$cks" \
-        --argjson tl "$tlj" '{host:$h, id:$id, checksum:$c, tl:$tl}')" >/dev/null
+        --argjson tl "$tlj" --argjson tlk "$tlk" '{host:$h, id:$id, checksum:$c, tl:$tl, tl_kattis:$tlk}')" >/dev/null
 }
 
 # report_calib_log <id> <checksum> <logfile> [pkgdir] : envia ao MOJ o LOG de calibração
@@ -183,17 +196,27 @@ report_calib_log() {
 }
 
 # ---- tetos DINÂMICOS de wall-clock (por job/por calibração) -------------------------
-# _job_cap <pkgdir> <lang> -> segundos p/ UM julgamento: (TL+2.2)s/teste ×2 (rerun de TLE)
+# _job_cap <pkgdir> <lang> [método] -> segundos p/ UM julgamento: (TL+2.2)s/teste ×2 (rerun de TLE)
 # + compile-tl + folga. Piso 300s; fallback fixo se o pacote não dá p/ ler.
 _job_cap() {
-  local pkg="$1" lang="$2" n tl compl cap
+  local pkg="$1" lang="$2" meth="${3:-}" n tl compl cap
   n="$(find "$pkg/tests/input" -maxdepth 1 -type f 2>/dev/null | wc -l)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || { printf '%s' "$AGENT_HARD_TL_FALLBACK"; return; }
   # TLOVERRIDE do conf (o autor manda no TL) tem de entrar no TETO: com override de 10s e
   # calibrado de 0.03s, um cap calculado do calibrado mataria o job legítimo no wall-clock.
-  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE; source "$pkg/tl.$AGENT_HOST" 2>/dev/null
+  # O MÉTODO do TL (o do job › TLMETHOD do conf) escolhe a metade da tabela: o TL Kattis costuma ser
+  # bem maior que o MOJ (arredonda p/ cima a 1 s), e um teto do MOJ mataria o job Kattis legítimo.
+  # TLMOD sum/mult (que o build-and-test aplica) entram também.
+  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE TLKATTIS; source "$pkg/tl.$AGENT_HOST" 2>/dev/null
            source "$pkg/conf" 2>/dev/null
-           printf '%s' "${TLOVERRIDE[$lang]:-${TLOVERRIDE[default]:-${TL[$lang]:-${TL[default]:-5}}}}" ) )"
+           m="${meth:-${TLMETHOD:-moj}}"; b=""
+           if [[ "$m" == kattis && ${#TLKATTIS[@]} -gt 0 ]]; then b="${TLKATTIS[$lang]:-${TLKATTIS[default]:-}}"
+           else b="${TL[$lang]:-${TL[default]:-}}"; fi
+           [[ "$b" =~ ^[0-9]*[.]?[0-9]+$ ]] || b=5
+           [[ "${TLMOD[$lang.sum]:-}" =~ ^[0-9]*[.]?[0-9]+$ ]] && b="$(echo "$b + ${TLMOD[$lang.sum]}" | bc -l)"
+           [[ "${TLMOD[$lang.mult]:-}" =~ ^[0-9]*[.]?[0-9]+$ ]] && b="$(echo "$b * ${TLMOD[$lang.mult]}" | bc -l)"
+           printf '%s' "${TLOVERRIDE[$lang]:-${TLOVERRIDE[default]:-$b}}" ) )"
+  [[ "$tl" =~ ^\. ]] && tl="0$tl"
   [[ "$tl" =~ ^[0-9]+([.][0-9]+)?$ ]] || tl=5
   compl="$(cat "$pkg/scripts/$lang/compile-tl" "$MOJTOOLS_DIR/lang/$lang/compile-tl" 2>/dev/null | head -n1)"
   [[ "$compl" =~ ^[0-9]+$ ]] || compl=30
@@ -203,9 +226,11 @@ _job_cap() {
   printf '%s' "$cap"
 }
 # _calib_cap <pkgdir> <full> -> segundos p/ a calibração: (CALIBRATIONTL+2.2)s/teste × nº de
-# soluções (full = todas; senão só good) ×2 + compilações + folga. Piso 300s.
+# soluções (full = todas; senão só good) ×2 + compilações + folga. Piso 300s. Na full, pass/slow/wrong rodam
+# até o PISO dos dois métodos (mojtools build-and-test, MOJ_CALIB_ALT: b × o TL Kattis, teto 30 s) — o
+# orçamento por teste sobe junto: max(CALIBRATIONTL + 2,2; min(30; b × ⌈a × CALIBRATIONTL ÷ r⌉ × r + 0,5)).
 _calib_cap() {
-  local pkg="$1" full="${2:-0}" n s caltl cap
+  local pkg="$1" full="${2:-0}" n s caltl cap per
   n="$(find "$pkg/tests/input" -maxdepth 1 -type f 2>/dev/null | wc -l)"
   if [[ "$full" == 1 ]]; then s="$(find "$pkg/sols" -mindepth 2 -maxdepth 2 -type f 2>/dev/null | wc -l)"
   else s="$(find "$pkg/sols/good" -maxdepth 1 -type f 2>/dev/null | wc -l)"; fi
@@ -214,7 +239,19 @@ _calib_cap() {
   caltl="$( ( declare -A ULIMITS TLMOD TLOVERRIDE; CALIBRATIONTL=""; source "$pkg/conf" 2>/dev/null
               printf '%s' "${CALIBRATIONTL:-5}" ) )"
   [[ "$caltl" =~ ^[0-9]+([.][0-9]+)?$ ]] || caltl=5
-  cap="$(echo "($caltl + 2.2) * $n * $s * 2 + $s * 30 + 120" | bc -l 2>/dev/null)"; cap="${cap%%.*}"
+  per="$(echo "$caltl + 2.2" | bc -l)"
+  if [[ "$full" == 1 ]]; then
+    local ka kb kr
+    read -r ka kb kr < <( ( declare -A ULIMITS TLMOD TLOVERRIDE; source "$pkg/conf" 2>/dev/null
+        a="${KATTIS_AC_TO_TIME_LIMIT:-2.0}"; b="${KATTIS_TIME_LIMIT_TO_TLE:-1.5}"; r="${KATTIS_TIME_RESOLUTION:-1.0}"
+        [[ "$a" =~ ^[0-9]*[.]?[0-9]+$ ]] || a=2.0; [[ "$b" =~ ^[0-9]*[.]?[0-9]+$ ]] || b=1.5
+        [[ "$r" =~ ^[0-9]*[.]?[0-9]+$ ]] && [[ "$(echo "$r > 0" | bc -l)" == 1 ]] || r=1.0
+        printf '%s %s %s\n' "$a" "$b" "$r" ) )
+    per="$(echo "x = $ka * $caltl / $kr; scale = 0; k = x / 1; if (k < x) k = k + 1; scale = 20;
+                 f = $kb * k * $kr + 0.5; if (f > 30) f = 30; if (f < $per) f = $per; f" | bc -l 2>/dev/null)"
+    [[ "$per" =~ ^[0-9]*[.]?[0-9]+$ ]] || per="$(echo "$caltl + 2.2" | bc -l)"
+  fi
+  cap="$(echo "$per * $n * $s * 2 + $s * 30 + 120" | bc -l 2>/dev/null)"; cap="${cap%%.*}"
   [[ "$cap" =~ ^[0-9]+$ ]] || cap="$AGENT_HARD_TL_FALLBACK"
   (( cap < 300 )) && cap=300
   printf '%s' "$cap"
@@ -231,9 +268,11 @@ _calib_cap() {
 # full=1 força recalibração rodando TODAS as soluções (Calibrar explícito). req_epoch = quando o
 # PEDIDO foi feito (requested_at do update / at do comando): full de um pedido MAIS VELHO que a
 # última calibração full do MESMO checksum é duplicata satisfeita — skip (checksum novo SEMPRE
-# recalibra). Ecoa o diretório do pacote.
+# recalibra). `meth` (5º arg, o tl_method do job): com `kattis`, uma tabela SEM a metade Kattis (calibrada por um
+# mojtools anterior a 26/10/2026) não serve — recalibra (rápido) antes de julgar; nunca julga pela tabela errada.
+# Ecoa o diretório do pacote.
 ensure_cached() {
-  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" cdir meta mj sc local_cks
+  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" cdir meta mj sc local_cks
   [[ "$req_epoch" =~ ^[0-9]+$ ]] || req_epoch=0
   cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
   mkdir -p "$cdir" 2>/dev/null
@@ -244,7 +283,8 @@ ensure_cached() {
   local_cks="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
 
   # cache válido (mesma versão) + já calibrado: opcionalmente re-reporta e sai (full=1 recalibra)
-  if [[ "$full" != 1 && -d "$cdir/pkg" && "$local_cks" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then
+  if [[ "$full" != 1 && -d "$cdir/pkg" && "$local_cks" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]] \
+     && _tl_has_method "$cdir/pkg/tl.$AGENT_HOST" "$meth"; then
     if [[ "$force" == 1 ]]; then
       report_tl "$id" "$sc" "$cdir/pkg" \
         && jq -c --argjson now "$EPOCHSECONDS" '.tl_reported=true|.reported_at=$now' "$meta" >"$meta.t" 2>/dev/null \
@@ -260,7 +300,8 @@ ensure_cached() {
   (
     flock -w "$AGENT_LOCK_WAIT" 9 || { alog "timeout esperando lock de $id (${AGENT_LOCK_WAIT}s)"; exit 1; }
     local lc; lc="$(jq -r '.checksum // empty' "$meta" 2>/dev/null)"
-    if [[ "$full" != 1 && -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then exit 0; fi  # outro já fez
+    if [[ "$full" != 1 && -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]] \
+       && _tl_has_method "$cdir/pkg/tl.$AGENT_HOST" "$meth"; then exit 0; fi  # outro já fez
     # INVARIANTE "calibra 1× por máquina": mesmo o full (Calibrar explícito) PULA se uma
     # calibração full DESTE MESMO checksum já satisfaz o pedido — seja porque completou
     # enquanto esperávamos o lock (calibrated_at >= wait_start: N pedidos concorrentes
@@ -292,7 +333,8 @@ ensure_cached() {
     fi
     # STUB do GC: se o TL deste MESMO checksum foi preservado ($cdir/tl.$AGENT_HOST) quando o
     # pkg/ foi removido por idade, restaura e PULA a recalibração (o GC não custa recalibrar).
-    if [[ "$full" != 1 && ! -f "$cdir/pkg/tl.$AGENT_HOST" && -f "$cdir/tl.$AGENT_HOST" && "$lc" == "$sc" ]]; then
+    if [[ "$full" != 1 && ! -f "$cdir/pkg/tl.$AGENT_HOST" && -f "$cdir/tl.$AGENT_HOST" && "$lc" == "$sc" ]] \
+       && _tl_has_method "$cdir/tl.$AGENT_HOST" "$meth"; then
       cp -f "$cdir/tl.$AGENT_HOST" "$cdir/pkg/tl.$AGENT_HOST" 2>/dev/null
       rm -f "$cdir/tl.$AGENT_HOST"
       report_tl "$id" "$sc" "$cdir/pkg" || alog "report_tl falhou $id"
@@ -512,8 +554,15 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   filename="$(basename "$(jq -r '.filename // "solution"' <<<"$job")")"
   code_b64="$(jq -r '.code_b64 // .fileb64 // ""' <<<"$job")"
 
+  # MÉTODO DO TL (mojtools tl-methods.sh): o servidor o tira do conf ATUAL ao entregar o job (o TLMETHOD fica
+  # fora dos carimbos do pacote, então o conf do cache pode estar velho). Vai ao build-and-test (MOJ_TL_METHOD),
+  # ao teto do job e ao ensure_cached (job kattis com tabela sem a metade Kattis recalibra antes de julgar).
+  # Servidor antigo (sem o campo): vazio — o build-and-test usa o TLMETHOD do conf, como sempre.
+  local tlm; tlm="$(jq -r '.tl_method // empty' <<<"$job")"
+  [[ "$tlm" == moj || "$tlm" == kattis ]] || tlm=""
+
   # garante o pacote no cache (baixa + calibra na 1ª vez / se mudou)
-  local pkg; pkg="$(ensure_cached "$problem")" || {
+  local pkg; pkg="$(ensure_cached "$problem" 0 0 0 "$tlm")" || {
     _post_judge_error "$id" "$contest" "$problem" "$login" "$lang" "Judge Error (pacote indisponível)"
     alog "FALHA preparar pacote id=$id problem=$problem"; return; }
 
@@ -526,11 +575,11 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   # TETO DE WALL-CLOCK dinâmico (TL×testes×2 + compile + folga): o laço principal mata a árvore
   # e reporta Judge Error quando o `.deadline` passa — um job preso em infra/sandbox morre
   # sozinho e nunca entope o juiz (e o reset alcança tudo: sem `timeout`, sem pgroup à parte).
-  jcap="$(_job_cap "$pkg" "$lang")"
+  jcap="$(_job_cap "$pkg" "$lang" "$tlm")"
   _slot_deadline "$jcap"
   # stderr do b-a-t em ARQUIVO (era /dev/null): quando ele morre por sinal, a única pista do
   # motivo é essa — a Maratona 29/08 custou uma manhã de forense por causa do descarte.
-  out="$(MOJ_PROBLEM_ID="$problem" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
+  out="$(MOJ_PROBLEM_ID="$problem" MOJ_TL_METHOD="$tlm" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
   jrc=$?
   _slot_deadline_clear
   wb="$(printf '%s\n' "$out" | head -n1)"
