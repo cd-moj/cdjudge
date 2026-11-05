@@ -73,6 +73,12 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     tabela sem a metade Kattis recalibra (rápido) antes de julgar (`_tl_has_method`; não exige se o mojtools local
     não tem o `tl-methods.sh`). `_calib_cap` da full orça o piso de pass/slow/wrong (b × ⌈a × CALIBRATIONTL⌉,
     teto 30 s por teste).
+  - **Relógio do TL (05/11/2026)**: `TLCLOCK=cpu` no conf (mojtools) cobra o TL pelo CPU e a parede vira um teto
+    maior. Nada vai no job (a chave está no `tl_checksum`: trocar recalibra; o conf do cache é o atual). `_wall_per
+    <pkg> <por-teste> <tl>` = `max(3 × TL, ⌈por-teste⌉ + 1, WALLTL)` no cpu (a conta do build-and-test) (o de sempre na parede), usado pelo
+    `_job_cap` e pelo `_calib_cap`; o `agent_tests_json` prefere `<teste>-log.exectime` (o tempo cobrado) ao `real`.
+    Suba mojtools e judge JUNTOS (agente velho + mojtools novo = parede como `time` num problema cpu ⇒ `over_tl` falso
+    no servidor). Testes em `test/agent.sh`.
   - **Juízes idênticos, mesmo TL (26/10/2026)**: o job traz `tl_class` (o máx, por linguagem, entre os juízes da
     mesma classe de hardware — o servidor deriva a classe dos specs do register). `_tl_job_file` grava `tl.job` no
     dir do job = a tabela local + uma linha por chave em que a classe é MAIOR (o `source` fica com a última; nunca

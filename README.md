@@ -155,6 +155,14 @@ wall-clock (`_job_cap`, que também soma o `TLMOD` sum/mult — o TL Kattis cost
 julgar** — nunca julga pela tabela errada. Na calibração completa, pass/slow/wrong rodam até o piso dos dois
 métodos (até 30 s por teste), e o `_calib_cap` orça isso.
 
+**Relógio do TL (05/11/2026; mojtools `build-and-test.sh`, formato em `cdmoj/docs/PACOTE.md` "Relógio do TL"):**
+com `TLCLOCK=cpu` no conf o TL é cobrado pelo tempo de CPU (user+sys) e a parede vira um teto maior
+(`max(3 × TL, ⌈o de sempre⌉ + 1, WALLTL)`, onde "o de sempre" é o teto de CPU: TL + 2,2 s). O agente lê o conf do próprio cache (a chave está no `tl_checksum`, então
+trocar o relógio recalibra e nada vai no job): o `_wall_per` dá esse teto por teste ao `_job_cap` e ao
+`_calib_cap`, e o `agent_tests_json` manda como `time` o tempo cobrado (`<teste>-log.exectime`, que o
+build-and-test grava no cpu) em vez do `real`. **mojtools e judge sobem juntos:** um agente velho com o mojtools
+novo mandaria a parede como tempo de um problema cpu.
+
 **Teste do agente (sem rede, sem jaula):** `make test` (= `bash test/agent.sh`) exercita as funções
 sourced — fatiamento por nó NUMA, `_kill_tree` contra uma árvore com `timeout`, o teto de wall-clock
 imposto pelo laço, o lote despachado no beat que traz `config`, config igual adotada sem drenar, o

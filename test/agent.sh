@@ -319,6 +319,26 @@ cq="$(_calib_cap "$PC" 0)"; cf="$(_calib_cap "$PC" 1)"; DBG="rápida=$cq complet
 ck "_calib_cap: rápida = 7,2 s/teste (só good: 7,2×10×1×2+30+120); completa = 15,5 s/teste" '[[ "$cq" == 300 && "$cf" == 800 ]]'
 printf 'KATTIS_TIME_LIMIT_TO_TLE=50\n' > "$PC/conf"
 ck "_calib_cap: o piso para em 30 s por teste" '[[ "$(_calib_cap "$PC" 1)" == 1380 ]]'
+# relógio de CPU (TLCLOCK=cpu, mojtools 05/11/2026): o teto de parede por teste é max(3 × TL, o de sempre + 1, WALLTL)
+printf 'TLCLOCK=cpu\n' > "$PK/conf"
+DBG="$(_job_cap "$PK" c)"
+ck "_job_cap cpu: parede ⌈0,3035+2,2⌉+1 = 4 s/teste → 4×100×2+90" '[[ "$(_job_cap "$PK" c)" == 890 ]]'
+printf 'TLCLOCK=cpu\nWALLTL=10\n' > "$PK/conf"
+ck "_job_cap cpu: WALLTL=10 sobe a parede (10×100×2+90)" '[[ "$(_job_cap "$PK" c)" == 2090 ]]'
+printf 'TLCLOCK=cpu\nTLOVERRIDE[default]=4\n' > "$PK/conf"
+ck "_job_cap cpu: TL 4 (override) → parede 3 × 4 = 12 s/teste" '[[ "$(_job_cap "$PK" c)" == 2490 ]]'
+printf 'TLCLOCK=wall\n' > "$PK/conf"
+ck "_job_cap wall: o de sempre" '[[ "$(_job_cap "$PK" c)" == 590 ]]'
+printf 'TLCLOCK=cpu\n' > "$PC/conf"
+cq="$(_calib_cap "$PC" 0)"; cf="$(_calib_cap "$PC" 1)"; DBG="rápida=$cq completa=$cf"
+ck "_calib_cap cpu: rápida 3 × 5 = 15 s/teste; completa ⌈15,5⌉ + 1 = 17 s/teste" '[[ "$cq" == 450 && "$cf" == 860 ]]'
+: > "$PC/conf"
+# agent_tests_json: o tempo COBRADO (<teste>-log.exectime, relógio cpu) vence o real do timelog
+WT="$W/wbclock"; mkdir -p "$WT"; printf 'VERDICT[t1]=AC\nVERDICT[t2]=TLE\n' > "$WT/log.verdictall"
+printf 'real 2.50\nuser 0.15\n' > "$WT/t1-log.timelog"; printf '0.20\n' > "$WT/t1-log.exectime"
+printf 'real 0.40\nuser 0.30\n' > "$WT/t2-log.timelog"
+DBG="$(agent_tests_json "$WT" 1)"
+ck "agent_tests_json: -log.exectime › real; sem ele, o real" '[[ "$(jq "[.[].time] == [0.2, 0.4]" <<<"$DBG")" == true ]]'
 # auto-cura: job kattis com tabela sem a metade Kattis recalibra (rápido) antes de julgar; moj não
 _api_get(){ printf '{"exists":true,"checksum":"cks1"}'; }
 cat > "$W/mt/calibreitor.sh" <<'EOC'

@@ -295,11 +295,25 @@ report_calib_log() {
 }
 
 # ---- tetos DINÂMICOS de wall-clock (por job/por calibração) -------------------------
-# _job_cap <pkgdir> <lang> [método] [tabela] -> segundos p/ UM julgamento: (TL+2.2)s/teste ×2 (rerun de TLE)
+# _wall_per <pkgdir> <por-teste> <tl> -> o teto de PAREDE de um teste. No relógio de parede (o padrão) = <por-teste>;
+# com TLCLOCK=cpu no conf (mojtools build-and-test, 05/11/2026) o TL é de CPU e a parede é só um teto MAIOR:
+# max(3 × TL, ⌈<por-teste>⌉ + 1, WALLTL) — a MESMA conta do build-and-test (o <por-teste> é o teto de CPU dele); sem
+# isto o laço mataria o job legítimo de quem fica bloqueado em I/O.
+_wall_per() {
+  local pkg="$1" per="$2" tl="$3" c w
+  read -r c w < <( ( declare -A ULIMITS TLMOD TLOVERRIDE TL TLKATTIS; TLCLOCK=""; WALLTL=""; source "$pkg/conf" 2>/dev/null
+                     printf '%s %s\n' "${TLCLOCK:-wall}" "${WALLTL:-0}" ) )
+  [[ "$c" == cpu ]] || { printf '%s' "$per"; return; }
+  [[ "$w" =~ ^[0-9]*[.]?[0-9]+$ ]] || w=0
+  echo "scale = 0; c = $per / 1; if (c < $per) c = c + 1; scale = 20; m = 3 * $tl; if (c + 1 > m) m = c + 1; if ($w > m) m = $w; m" \
+    | bc -l 2>/dev/null || printf '%s' "$per"
+}
+# _job_cap <pkgdir> <lang> [método] [tabela] -> segundos p/ UM julgamento: (TL+2.2)s/teste ×2 (rerun de TLE; com
+# TLCLOCK=cpu, o teto de parede do _wall_per)
 # + compile-tl + folga. Piso 300s; fallback fixo se o pacote não dá p/ ler. `tabela` = a do job (o tl.job do
 # _tl_job_file, com o TL da classe de hardware); ausente = a local, tl.$AGENT_HOST.
 _job_cap() {
-  local pkg="$1" lang="$2" meth="${3:-}" tlf="${4:-$1/tl.$AGENT_HOST}" n tl compl cap
+  local pkg="$1" lang="$2" meth="${3:-}" tlf="${4:-$1/tl.$AGENT_HOST}" n tl compl cap per
   n="$(find "$pkg/tests/input" -maxdepth 1 -type f 2>/dev/null | wc -l)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || { printf '%s' "$AGENT_HARD_TL_FALLBACK"; return; }
   # TLOVERRIDE do conf (o autor manda no TL) tem de entrar no TETO: com override de 10s e
@@ -321,7 +335,8 @@ _job_cap() {
   [[ "$tl" =~ ^[0-9]+([.][0-9]+)?$ ]] || tl=5
   compl="$(cat "$pkg/scripts/$lang/compile-tl" "$MOJTOOLS_DIR/lang/$lang/compile-tl" 2>/dev/null | head -n1)"
   [[ "$compl" =~ ^[0-9]+$ ]] || compl=30
-  cap="$(echo "($tl + 2.2) * $n * 2 + $compl + 60" | bc -l 2>/dev/null)"; cap="${cap%%.*}"
+  per="$(_wall_per "$pkg" "$(echo "$tl + 2.2" | bc -l)" "$tl")"; [[ "$per" =~ ^[0-9]*[.]?[0-9]+$ ]] || per="$(echo "$tl + 2.2" | bc -l)"
+  cap="$(echo "$per * $n * 2 + $compl + 60" | bc -l 2>/dev/null)"; cap="${cap%%.*}"
   [[ "$cap" =~ ^[0-9]+$ ]] || cap="$AGENT_HARD_TL_FALLBACK"
   (( cap < 300 )) && cap=300
   printf '%s' "$cap"
@@ -352,6 +367,7 @@ _calib_cap() {
                  f = $kb * k * $kr + 0.5; if (f > 30) f = 30; if (f < $per) f = $per; f" | bc -l 2>/dev/null)"
     [[ "$per" =~ ^[0-9]*[.]?[0-9]+$ ]] || per="$(echo "$caltl + 2.2" | bc -l)"
   fi
+  local wper; wper="$(_wall_per "$pkg" "$per" "$caltl")"; [[ "$wper" =~ ^[0-9]*[.]?[0-9]+$ ]] && per="$wper"
   cap="$(echo "$per * $n * $s * 2 + $s * 30 + 120" | bc -l 2>/dev/null)"; cap="${cap%%.*}"
   [[ "$cap" =~ ^[0-9]+$ ]] || cap="$AGENT_HARD_TL_FALLBACK"
   (( cap < 300 )) && cap=300
@@ -674,8 +690,12 @@ agent_tests_json() {  # $1=workdir $2=tl
     while IFS= read -r line; do
       [[ "$line" =~ ^VERDICT\[(.+)\]=(.+)$ ]] || continue
       file="${BASH_REMATCH[1]}"; code="${BASH_REMATCH[2]}"
-      t=""; [[ -s "$wb/$file-log.timelog" ]] && \
+      # o tempo COBRADO: <file>-log.exectime (mojtools com TLCLOCK=cpu: user+sys) › o `real` (parede)
+      t=""
+      if [[ -s "$wb/$file-log.exectime" ]]; then t="$(head -n1 "$wb/$file-log.exectime")"
+      elif [[ -s "$wb/$file-log.timelog" ]]; then
         t="$(grep -m1 '^real' "$wb/$file-log.timelog" 2>/dev/null | awk '{print $NF}')"
+      fi
       jq -cn --arg n "$file" --arg c "$code" --arg t "$t" --arg tl "$tl" \
         '{name:$n, code:$c, time:($t|tonumber? // null), tl:($tl|tonumber? // null)}'
     done < "$wb/log.verdictall"
