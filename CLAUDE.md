@@ -79,6 +79,8 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     `_job_cap` e pelo `_calib_cap`; o `agent_tests_json` prefere `<teste>-log.exectime` (o tempo cobrado) ao `real`.
     Suba mojtools e judge JUNTOS (agente velho + mojtools novo = parede como `time` num problema cpu ⇒ `over_tl` falso
     no servidor). Testes em `test/agent.sh`.
+  - **TL único (05/11/2026)**: `TLUNIFIED=y` no conf (mojtools `tl_unify_table`) = o mesmo TL em toda linguagem, o máx da
+    tabela do método. O `_job_cap` usa esse máx (senão o teto do job de linguagem rápida mataria o legítimo). Nada no job.
   - **Juízes idênticos, mesmo TL (26/10/2026)**: o job traz `tl_class` (o máx, por linguagem, entre os juízes da
     mesma classe de hardware — o servidor deriva a classe dos specs do register). `_tl_job_file` grava `tl.job` no
     dir do job = a tabela local + uma linha por chave em que a classe é MAIOR (o `source` fica com a última; nunca

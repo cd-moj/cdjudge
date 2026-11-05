@@ -322,11 +322,18 @@ _job_cap() {
   # bem maior que o MOJ (arredonda p/ cima a 1 s), e um teto do MOJ mataria o job Kattis legítimo.
   # TLMOD sum/mult (que o build-and-test aplica) entram também.
   # a tabela do JOB (4º arg: o tl.job com o TL da classe de hardware, _tl_job_file) ou a local
-  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE TLKATTIS; source "$tlf" 2>/dev/null
+  tl="$( ( declare -A TL TLMOD ULIMITS TLOVERRIDE TLKATTIS; TLUNIFIED=""; source "$tlf" 2>/dev/null
            source "$pkg/conf" 2>/dev/null
            m="${meth:-${TLMETHOD:-moj}}"; b=""
            if [[ "$m" == kattis && ${#TLKATTIS[@]} -gt 0 ]]; then b="${TLKATTIS[$lang]:-${TLKATTIS[default]:-}}"
            else b="${TL[$lang]:-${TL[default]:-}}"; fi
+           # TL ÚNICO (TLUNIFIED=y, mojtools tl_unify_table): o mesmo em toda linguagem = o máx da tabela do método
+           if [[ "${TLUNIFIED:-}" == y ]]; then
+             u="$( if [[ "$m" == kattis && ${#TLKATTIS[@]} -gt 0 ]]; then for k in "${!TLKATTIS[@]}"; do [[ "$k" == default ]] || echo "${TLKATTIS[$k]}"; done
+                   else for k in "${!TL[@]}"; do [[ "$k" == default ]] || echo "${TL[$k]}"; done; fi \
+                   | LC_ALL=C awk '/^([0-9]+\.?[0-9]*|\.[0-9]+)$/ { v = $1 + 0; if (m == "" || v > m) { m = v; s = $1 } } END { if (m != "") print s }' )"
+             [[ -n "$u" ]] && b="$u"
+           fi
            [[ "$b" =~ ^[0-9]*[.]?[0-9]+$ ]] || b=5
            [[ "${TLMOD[$lang.sum]:-}" =~ ^[0-9]*[.]?[0-9]+$ ]] && b="$(echo "$b + ${TLMOD[$lang.sum]}" | bc -l)"
            [[ "${TLMOD[$lang.mult]:-}" =~ ^[0-9]*[.]?[0-9]+$ ]] && b="$(echo "$b * ${TLMOD[$lang.mult]}" | bc -l)"

@@ -163,6 +163,10 @@ trocar o relógio recalibra e nada vai no job): o `_wall_per` dá esse teto por 
 build-and-test grava no cpu) em vez do `real`. **mojtools e judge sobem juntos:** um agente velho com o mojtools
 novo mandaria a parede como tempo de um problema cpu.
 
+**TL único (05/11/2026; `TLUNIFIED=y` no conf, formato em `cdmoj/docs/PACOTE.md` "TL único"):** o mesmo TL em toda
+linguagem, o máximo da tabela do método. O build-and-test aplica; o agente só precisa do teto: o `_job_cap` usa o máx
+da tabela quando o conf do cache tem a chave. Nada vai no job (a linha está no `tl_checksum`).
+
 **Teste do agente (sem rede, sem jaula):** `make test` (= `bash test/agent.sh`) exercita as funções
 sourced — fatiamento por nó NUMA, `_kill_tree` contra uma árvore com `timeout`, o teto de wall-clock
 imposto pelo laço, o lote despachado no beat que traz `config`, config igual adotada sem drenar, o

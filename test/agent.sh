@@ -312,6 +312,16 @@ printf 'TLMETHOD=kattis\n' > "$PK/conf"
 ck "_job_cap: sem método no job, vale o TLMETHOD do conf; o job vence o conf" '[[ "$(_job_cap "$PK" c)" == 1130 && "$(_job_cap "$PK" c moj)" == 590 ]]'
 printf 'TLMETHOD=kattis\nTLMOD[c.mult]=2\n' > "$PK/conf"
 ck "_job_cap: TLMOD mult entra (Kattis 3 × 2 = 6)" '[[ "$(_job_cap "$PK" c)" == 1730 ]]'
+# TL ÚNICO (TLUNIFIED=y): o job em C usa o máx da tabela do método (o do py)
+cp "$PK/tl.t1" "$W/tl.t1.bak"
+printf 'TL[c]=.3035\nTL[py]=1.775\nTL[default]=.3035\ndeclare -A TLKATTIS\nTLKATTIS[c]=1\nTLKATTIS[py]=3\nTLKATTIS[default]=1\n' > "$PK/tl.t1"
+: > "$PK/conf"
+ck "_job_cap sem TL único: o do C (0,3035)" '[[ "$(_job_cap "$PK" c)" == 590 ]]'
+printf 'TLUNIFIED=y\n' > "$PK/conf"
+ck "_job_cap com TL único: o do py (1,775+2,2)×100×2+90" '[[ "$(_job_cap "$PK" c)" == 885 ]]'
+printf 'TLUNIFIED=y\nTLMETHOD=kattis\n' > "$PK/conf"
+ck "_job_cap com TL único no Kattis: o do py (3)" '[[ "$(_job_cap "$PK" c)" == 1130 ]]'
+mv "$W/tl.t1.bak" "$PK/tl.t1"
 # _calib_cap: 10 testes × 2 soluções; full = piso do Kattis (1,5 × ⌈2 × 5⌉ + 0,5 = 15,5 s por teste)
 PC="$W/pkgcal"; mkdir -p "$PC/tests/input" "$PC/sols/good" "$PC/sols/slow"; for i in $(seq 1 10); do : > "$PC/tests/input/t$i"; done
 : > "$PC/sols/good/a.c"; : > "$PC/sols/slow/s.c"; : > "$PC/conf"
