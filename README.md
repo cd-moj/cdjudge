@@ -155,6 +155,10 @@ wall-clock (`_job_cap`, que também soma o `TLMOD` sum/mult — o TL Kattis cost
 julgar** — nunca julga pela tabela errada. Na calibração completa, pass/slow/wrong rodam até o piso dos dois
 métodos (até 30 s por teste), e o `_calib_cap` orça isso.
 
+A **regra do veredicto** também vem no job: `verdict_rule` (`first`|`worst`, uma opção do contest que o servidor lê no
+conf do contest ao entregar). O agente a repassa ao build-and-test em `MOJ_VERDICT_RULE`. Com `first`, o veredicto é o
+do 1º teste que falhou (exemplos primeiro). Sem o campo, nada muda: vale o teste mais grave.
+
 **Relógio do TL (05/11/2026; mojtools `build-and-test.sh`, formato em `cdmoj/docs/PACOTE.md` "Relógio do TL"):**
 com `TLCLOCK=cpu` no conf o TL é cobrado pelo tempo de CPU (user+sys) e a parede vira um teto maior
 (`max(3 × TL, ⌈o de sempre⌉ + 1, WALLTL)`, onde "o de sempre" é o teto de CPU: TL + 2,2 s). O agente lê o conf do próprio cache (a chave está no `tl_checksum`, então

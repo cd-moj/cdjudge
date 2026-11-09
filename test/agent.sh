@@ -531,6 +531,7 @@ TLFILE="$3/tl"; [[ -e "$3/tl.$HOSTNAME" ]] && TLFILE="$3/tl.$HOSTNAME"
 declare -A TL TLKATTIS; source "$TLFILE"
 w="$(mktemp -d)"; printf "TL_LANG='%s'\n" "${TL[$1]:-${TL[default]}}" > "$w/report.env"
 echo "bat tlfile=$(basename "${MOJ_TLFILE:-SEM}") tl=${TL[$1]:-${TL[default]}}" >> "$CAL_LOG"
+echo "bat rule=${MOJ_VERDICT_RULE:-SEM}" >> "$CAL_LOG"
 echo "$w"; echo "Accepted,100p"
 EOB
 printf '{"id":"o#cls","checksum":"cks1","tl_reported":true}' > "$CK/.moj-cache.json"
@@ -544,6 +545,14 @@ ck "…e o result leva tl_used 0,4"               '[[ "$(jq -r .tl_used "$FAKE_L
 JOBJ="$(jq -c 'del(.tl_class) | .id = "jc2"' <<<"$JOBJ")"; : > "$CAL_LOG"
 ( TMPDIR="$W/tj"; run_job "$JOBJ" "" ); DBG="$(cat "$CAL_LOG")"
 ck "job sem tl_class: a tabela local, sem MOJ_TLFILE (c = 0,3)" 'grep -qx "bat tlfile=SEM tl=.3" "$CAL_LOG"'
+ck "job sem verdict_rule: o b-a-t não recebe regra (o mais grave)" 'grep -qx "bat rule=SEM" "$CAL_LOG"'
+# regra do veredicto do CONTEST (09/11/2026): o job a traz e o agente a repassa; valor estranho não passa
+JOBJ="$(jq -c '.id = "jc3" | .verdict_rule = "first"' <<<"$JOBJ")"; : > "$CAL_LOG"
+( TMPDIR="$W/tj"; run_job "$JOBJ" "" ); DBG="$(cat "$CAL_LOG")"
+ck "job verdict_rule=first: MOJ_VERDICT_RULE=first no b-a-t" 'grep -qx "bat rule=first" "$CAL_LOG"'
+JOBJ="$(jq -c '.id = "jc4" | .verdict_rule = "x;rm"' <<<"$JOBJ")"; : > "$CAL_LOG"
+( TMPDIR="$W/tj"; run_job "$JOBJ" "" ); DBG="$(cat "$CAL_LOG")"
+ck "verdict_rule estranho não passa"            'grep -qx "bat rule=SEM" "$CAL_LOG"'
 
 # ---- REPORTS DA CALIBRAÇÃO (26/10/2026): todos os report.html até os tetos de BYTES — o teto era 12 POR CONTAGEM e
 # o olamundo (15 soluções de 8,5 KB) perdia os 3 últimos em ordem alfabética (a .pas, a .rs e a slow)

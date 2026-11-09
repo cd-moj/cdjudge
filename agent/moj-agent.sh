@@ -740,6 +740,10 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   local tlm="" tlc=""
   { read -r tlm; read -r tlc; } < <(jq -r '(.tl_method // ""), (.tl_class // null | if . == null then "" else tojson end)' <<<"$job" 2>/dev/null)
   [[ "$tlm" == moj || "$tlm" == kattis ]] || tlm=""
+  # REGRA DO VEREDICTO (09/11/2026, opção do CONTEST): `first` = o do 1º teste que falhou (exemplos primeiro); o
+  # servidor a põe no job ao entregar. Vazio/outro valor (treino, servidor antigo) = o teste mais grave, como sempre.
+  local vrule=""; vrule="$(jq -r '.verdict_rule // ""' <<<"$job" 2>/dev/null)"
+  [[ "$vrule" == first || "$vrule" == worst ]] || vrule=""
 
   # garante o pacote no cache (baixa + calibra na 1ª vez / se mudou)
   local pkg; pkg="$(ensure_cached "$problem" 0 0 0 "$tlm")" || {
@@ -765,7 +769,7 @@ run_job() {  # $1 = job JSON  $2 = cpuset do slot ("" = sem pin)  (bg; faz o pr�
   _slot_deadline "$jcap"
   # stderr do b-a-t em ARQUIVO (era /dev/null): quando ele morre por sinal, a única pista do
   # motivo é essa — a Maratona 29/08 custou uma manhã de forense por causa do descarte.
-  out="$(MOJ_PROBLEM_ID="$problem" MOJ_TL_METHOD="$tlm" MOJ_TLFILE="$tljob" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
+  out="$(MOJ_PROBLEM_ID="$problem" MOJ_TL_METHOD="$tlm" MOJ_VERDICT_RULE="$vrule" MOJ_TLFILE="$tljob" bash "$BAT" "$lang" "$src" "$pkg" y 2>"$work/bat.stderr")"
   jrc=$?
   _slot_deadline_clear
   wb="$(printf '%s\n' "$out" | head -n1)"
