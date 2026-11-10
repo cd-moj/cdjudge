@@ -349,6 +349,10 @@ printf 'real 2.50\nuser 0.15\n' > "$WT/t1-log.timelog"; printf '0.20\n' > "$WT/t
 printf 'real 0.40\nuser 0.30\n' > "$WT/t2-log.timelog"
 DBG="$(agent_tests_json "$WT" 1)"
 ck "agent_tests_json: -log.exectime › real; sem ele, o real" '[[ "$(jq "[.[].time] == [0.2, 0.4]" <<<"$DBG")" == true ]]'
+# o rerun de TLE acrescenta outra linha do MESMO teste: sai uma vez, com o veredicto final, na ordem original
+W2="$(mktemp -d)"; printf 'VERDICT[t1]=AC\nVERDICT[t2]=TLE\nVERDICT[t3]=AC\nVERDICT[t2]=AC\n' > "$W2/log.verdictall"
+DBG="$(agent_tests_json "$W2" 1)"; rm -rf "$W2"
+ck "agent_tests_json: teste com rerun sai UMA vez, com o veredicto final" '[[ "$(jq -c "[.[] | .name + \":\" + .code]" <<<"$DBG")" == "[\"t1:AC\",\"t2:AC\",\"t3:AC\"]" ]]'
 # auto-cura: job kattis com tabela sem a metade Kattis recalibra (rápido) antes de julgar; moj não
 _api_get(){ printf '{"exists":true,"checksum":"cks1"}'; }
 cat > "$W/mt/calibreitor.sh" <<'EOC'

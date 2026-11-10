@@ -706,7 +706,11 @@ agent_tests_json() {  # $1=workdir $2=tl
       jq -cn --arg n "$file" --arg c "$code" --arg t "$t" --arg tl "$tl" \
         '{name:$n, code:$c, time:($t|tonumber? // null), tl:($tl|tonumber? // null)}'
     done < "$wb/log.verdictall"
-  } | jq -s -c '.'
+  } | jq -s -c '
+    # o rerun de TLE ACRESCENTA uma linha VERDICT[<teste>] ao log.verdictall (o build-and-test faz `source` e fica com a
+    # última): um teste por nome, o veredicto FINAL (a última linha), na ordem em que apareceu pela 1ª vez
+    . as $a | ($a | reduce .[] as $t ({}; .[$t.name] = $t)) as $last
+    | reduce ($a[] | .name) as $n ([]; if any(.[]; . == $n) then . else . + [$n] end) | map($last[.])'
 }
 
 # resultado de Judge Error simples (sem testes), p/ falhas de preparo do pacote.
