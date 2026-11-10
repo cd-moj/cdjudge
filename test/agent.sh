@@ -386,6 +386,27 @@ printf '{"id":"o#rel2","checksum":"cks1"}' > "$CR2/.moj-cache.json"; : > "$CAL_L
 out="$(AGENT_CALIB_LANES=0 ensure_cached "o#rel2" 0 0 0 moj)"; DBG="$(cat "$CAL_LOG")"
 ck "AGENT_CALIB_LANES=0 chega como MOJ_CALIB_LANES=0 (a calibração disparada por job também)" 'grep -qx "calib rel=SEM lanes=0" "$CAL_LOG"'
 
+echo "== calibração incremental (10/11/2026, opt-in): o memo sempre no cache, o reuse só com o pedido =="
+cat > "$W/mt/calibreitor.sh" <<'EOC'
+echo "calib memo=${MOJ_CALIB_MEMO_DIR:-SEM} reuse=${MOJ_CALIB_REUSE:-SEM} only_good=${CALIBRATE_ONLY_GOOD:-n}" >> "$CAL_LOG"
+printf 'TL[c]=.3035\nTL[default]=.3035\n' > "$1/tl.$HOSTNAME"
+EOC
+CM="$(cache_id_dir "o#memo")"; mkdir -p "$CM/pkg/tests/input"; : > "$CM/pkg/tests/input/t1"; : > "$CM/pkg/conf"
+printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"
+out="$(ensure_cached "o#memo" 1 1 0 "" 1)"; DBG="$(cat "$CAL_LOG")"
+ck "full com reuse: MOJ_CALIB_MEMO_DIR no cache do problema e MOJ_CALIB_REUSE=1" 'grep -qx "calib memo=$CM/calib-memo reuse=1 only_good=n" "$CAL_LOG"'
+printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"
+out="$(ensure_cached "o#memo" 1 1 0)"; DBG="$(cat "$CAL_LOG")"
+ck "full SEM o pedido: grava o memo, não reaproveita (padrão desligado)" 'grep -qx "calib memo=$CM/calib-memo reuse=0 only_good=n" "$CAL_LOG"'
+rm -f "$CM/pkg/tl.t1"; printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"
+out="$(ensure_cached "o#memo" 0 0 0 "" 1)"; DBG="$(cat "$CAL_LOG")"
+ck "calibração rápida (1º envio) nunca reaproveita" 'grep -qx "calib memo=$CM/calib-memo reuse=0 only_good=1" "$CAL_LOG"'
+upd_ru(){ jq -r 'if .reuse == true then 1 else 0 end' <<<"$1"; }
+ck "o pedido: reuse:true = 1; ausente/false = 0" '[[ "$(upd_ru "{\"reuse\":true}")" == 1 && "$(upd_ru "{}")" == 0 && "$(upd_ru "{\"reuse\":\"true\"}")" == 0 ]]'
+ck "run_update e run_command leem o .reuse do pedido" '[[ "$(grep -c "if .reuse == true then 1 else 0 end" "$JD/agent/moj-agent.sh")" == 2 ]]'
+mkdir -p "$CM/calib-memo/k1"; touch -d "30 days ago" "$CM/.last-used"
+ck "o GC leva o memo junto com o pkg/" '_gc_stub_one "$CM" && [[ ! -e "$CM/calib-memo" && ! -e "$CM/pkg" ]]'
+
 echo "== problema apagado: o 404 problem_gone é definitivo — não repete, marca, o boot pula, o GC apaga (26/10/2026) =="
 # o servidor responde 404 `problem_gone` ao report de problema que não existe mais; antes o agente repetia TODO
 # erro 3× (4 s por problema apagado no boot) e o re-report do boot batia nele a cada restart

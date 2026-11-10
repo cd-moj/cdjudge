@@ -396,7 +396,7 @@ _calib_cap() {
 # mojtools anterior a 26/10/2026) não serve — recalibra (rápido) antes de julgar; nunca julga pela tabela errada.
 # Ecoa o diretório do pacote.
 ensure_cached() {
-  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" cdir meta mj ex sc tck local_cks
+  local id="$1" force="${2:-0}" full="${3:-0}" req_epoch="${4:-0}" meth="${5:-}" reuse="${6:-0}" cdir meta mj ex sc tck local_cks
   [[ "$req_epoch" =~ ^[0-9]+$ ]] || req_epoch=0
   cdir="$(cache_id_dir "$id")"; meta="$cdir/.moj-cache.json"
   mkdir -p "$cdir" 2>/dev/null
@@ -496,11 +496,18 @@ ensure_cached() {
       # depois de recalibrar). O calibreitor novo também tira a variável; aqui vale p/ o mojtools antigo.
       # MOJ_CALIB_LANES: o interruptor das raias do calibreitor (os grupos do MOJ_CPU_GROUPS viram raias; a
       # calibração disparada por um job usa os grupos dele) — AGENT_CALIB_LANES=0 desliga também aqui
+      # CALIBRAÇÃO INCREMENTAL (10/11/2026, opt-in): o calibreitor SEMPRE grava o retrato de cada solução em
+      # <cache>/<id>/calib-memo (fora do pkg/, que é trocado a cada versão; o GC o apaga junto com o pkg/) e só
+      # REAPROVEITA com o pedido `reuse` (MOJ_CALIB_REUSE=1): a solução cuja chave não mudou não roda de novo.
+      # mojtools antigo ignora as duas variáveis.
+      local _reuse=0; [[ "$reuse" == 1 && "$full" == 1 ]] && _reuse=1
       if [[ "$full" == 1 ]]; then
         env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" MOJ_CALIB_LANES="${AGENT_CALIB_LANES:-1}" \
+          MOJ_CALIB_MEMO_DIR="$cdir/calib-memo" MOJ_CALIB_REUSE="$_reuse" \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       else
         env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" MOJ_CALIB_LANES="${AGENT_CALIB_LANES:-1}" CALIBRATE_ONLY_GOOD=1 \
+          MOJ_CALIB_MEMO_DIR="$cdir/calib-memo" MOJ_CALIB_REUSE=0 \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       fi
       _crc=$?
@@ -593,7 +600,7 @@ _gc_stub_one() {  # $1=cdir -> 0 se virou stub (preserva tl+meta; remove pkg/)
     id="$(jq -r '.id // empty' "$d/.moj-cache.json" 2>/dev/null)"
     szmb="$(du -sm "$d/pkg" 2>/dev/null | cut -f1)"
     [[ -f "$d/pkg/tl.$AGENT_HOST" ]] && cp -f "$d/pkg/tl.$AGENT_HOST" "$d/tl.$AGENT_HOST" 2>/dev/null
-    rm -rf "$d/pkg" "$d/.calib.log"
+    rm -rf "$d/pkg" "$d/.calib.log" "$d/calib-memo"   # o memo da calibração incremental vai junto (envelheceu com o pkg)
     alog "[gc] ${id:-$(basename "$d")}: pkg removido (${szmb:-?}MB; tl preservado no stub)"
   ) 9>"$d.lock"
 }
@@ -842,8 +849,9 @@ run_update() {  # $1 = request JSON  $2 = cpuset do slot ("" = sem pin)  (bg; PO
     calibrate)   # Calibrar explícito: roda TODAS as soluções (full=1) e reporta TL + log.
       # requested_at do pedido: duplicata mais velha que a última full do mesmo checksum = skip
       if [[ -n "$target" ]]; then
-        local _req; _req="$(jq -r '.requested_at // 0' <<<"$upd" 2>/dev/null)"
-        ensure_cached "$target" 1 1 "$_req" >/dev/null 2>"$logf"; rc=$?
+        local _req _ru; _req="$(jq -r '.requested_at // 0' <<<"$upd" 2>/dev/null)"
+        _ru="$(jq -r 'if .reuse == true then 1 else 0 end' <<<"$upd" 2>/dev/null)"   # calibração incremental (opt-in)
+        ensure_cached "$target" 1 1 "$_req" "" "${_ru:-0}" >/dev/null 2>"$logf"; rc=$?
         # anexa o LOG da calibração (calibreitor) ao report -> visível no MOJ sem ssh.
         local _cd; _cd="$(cache_id_dir "$target")"
         if [[ -f "$_cd/.calib.log" ]]; then
@@ -894,11 +902,12 @@ run_command() {  # $1 = command JSON {cmdid, action, ...}  $2 = cpuset do slot (
       register   # inventário agora vazio -> o MOJ vê o cache limpo
       ;;
     calibrate)   # calibração DIRECIONADA a este host (full): baixa/recalibra e reporta
-      local target creq; target="$(jq -r '.id // empty' <<<"$c" 2>/dev/null)"
+      local target creq cru; target="$(jq -r '.id // empty' <<<"$c" 2>/dev/null)"
       creq="$(jq -r '.at // 0' <<<"$c" 2>/dev/null)"
+      cru="$(jq -r 'if .reuse == true then 1 else 0 end' <<<"$c" 2>/dev/null)"   # calibração incremental (opt-in)
       if [[ -n "$target" ]]; then
-        alog "comando: calibrar $target (full) neste host${cpuset:+ [cpus $cpuset]}"
-        ensure_cached "$target" 1 1 "$creq" >/dev/null 2>&1 && alog "calibrado $target" || alog "calibrate $target falhou"
+        alog "comando: calibrar $target (full$( [[ "$cru" == 1 ]] && echo ', reaproveitando') ) neste host${cpuset:+ [cpus $cpuset]}"
+        ensure_cached "$target" 1 1 "$creq" "" "${cru:-0}" >/dev/null 2>&1 && alog "calibrado $target" || alog "calibrate $target falhou"
       else alog "comando calibrate sem id"; fi
       ;;
     *) alog "comando desconhecido: ${action:-<vazio>}" ;;

@@ -92,6 +92,10 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     do package-meta). Vai ao build-and-test por `MOJ_TLFILE` e ao `_job_cap` (4º arg). O 3º arg é SÓ o `tl_class`
     (o job leva o código em base64: >128 KiB num argumento do jq); chave/valor/host fora do formato não entram
     (o arquivo é `source`ado). Sem classe, servidor antigo ou checksum diferente: a tabela local.
+  - **Calibração INCREMENTAL (10/11/2026, opt-in)**: o update/comando `calibrate` pode trazer `reuse:true`;
+    `run_update`/`run_command` o passam ao `ensure_cached` (6º arg), que roda o calibreitor com
+    `MOJ_CALIB_MEMO_DIR="$cdir/calib-memo"` SEMPRE e `MOJ_CALIB_REUSE=1` só com o pedido e na full (a rápida nunca
+    reaproveita). O GC (`_gc_stub_one`) apaga o `calib-memo/` junto com o `pkg/`. Teste em `test/agent.sh`.
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports (TODOS os report.html
     até `AGENT_REPORT_MAX_BYTES` (10 MB) por arquivo e `AGENT_REPORTS_MAX_BYTES` (50 MB) no total — o que não cabe é
     pulado, os seguintes ainda entram, e sai no log; o teto era 12 POR CONTAGEM e 500 KB por arquivo: o olamundo
