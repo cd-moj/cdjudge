@@ -401,6 +401,17 @@ ck "full SEM o pedido: grava o memo, não reaproveita (padrão desligado)" 'grep
 rm -f "$CM/pkg/tl.t1"; printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"
 out="$(ensure_cached "o#memo" 0 0 0 "" 1)"; DBG="$(cat "$CAL_LOG")"
 ck "calibração rápida (1º envio) nunca reaproveita" 'grep -qx "calib memo=$CM/calib-memo reuse=0 only_good=1" "$CAL_LOG"'
+# "rodar tudo" pedido ENQUANTO a ♻ rodava (pedido mais velho que o fim dela): a ♻ não o satisfaz — roda; outra ♻, sim
+printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"; _t0="$EPOCHSECONDS"
+out="$(ensure_cached "o#memo" 1 1 0 "" 1)"
+ck "a full ♻ grava reuse:true no meta" 'jq -e ".full == true and .reuse == true" "$CM/.moj-cache.json" >/dev/null'
+: > "$CAL_LOG"; out="$(ensure_cached "o#memo" 1 1 "$((_t0 - 5))" "" 1)"; DBG="$(cat "$CAL_LOG")"
+ck "outra ♻ mais velha que ela: pulada (dedup de sempre)" '[[ ! -s "$CAL_LOG" ]]'
+out="$(ensure_cached "o#memo" 1 1 "$((_t0 - 5))" "" 0)"; DBG="$(cat "$CAL_LOG")"
+ck "um RODAR TUDO mais velho que a ♻: roda mesmo assim (reuse=0)" 'grep -qx "calib memo=$CM/calib-memo reuse=0 only_good=n" "$CAL_LOG"'
+ck "…e o meta passa a dizer full sem reuse" 'jq -e ".full == true and (has(\"reuse\") | not)" "$CM/.moj-cache.json" >/dev/null'
+: > "$CAL_LOG"; out="$(ensure_cached "o#memo" 1 1 "$((_t0 - 5))" "" 1)"
+ck "depois dele, uma ♻ velha é satisfeita pela completa" '[[ ! -s "$CAL_LOG" ]]'
 upd_ru(){ jq -r 'if .reuse == true then 1 else 0 end' <<<"$1"; }
 ck "o pedido: reuse:true = 1; ausente/false = 0" '[[ "$(upd_ru "{\"reuse\":true}")" == 1 && "$(upd_ru "{}")" == 0 && "$(upd_ru "{\"reuse\":\"true\"}")" == 0 ]]'
 ck "run_update e run_command leem o .reuse do pedido" '[[ "$(grep -c "if .reuse == true then 1 else 0 end" "$JD/agent/moj-agent.sh")" == 2 ]]'

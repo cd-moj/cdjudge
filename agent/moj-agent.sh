@@ -445,10 +445,13 @@ ensure_cached() {
     # duplicata requentada da fila morre num skip). Checksum NOVO nunca cai aqui (lc != sc
     # ⇒ recalibra); um "Calibrar" deliberado POSTERIOR (pedido novo) recalibra normalmente.
     if [[ "$full" == 1 && -d "$cdir/pkg" && "$lc" == "$sc" && -f "$cdir/pkg/tl.$AGENT_HOST" ]]; then
-      local _ca _fl
+      local _ca _fl _ru
       _ca="$(jq -r '.calibrated_at // 0' "$meta" 2>/dev/null)"
       _fl="$(jq -r '.full // false' "$meta" 2>/dev/null)"
-      if [[ "$_fl" == true && "$_ca" =~ ^[0-9]+$ ]] \
+      _ru="$(jq -r '.reuse // false' "$meta" 2>/dev/null)"
+      # calibração INCREMENTAL: a que reaproveitou NÃO satisfaz um pedido de "rodar tudo" (o autor pediu de propósito
+      # enquanto a ♻ rodava) — só outra ♻ é satisfeita por ela
+      if [[ "$_fl" == true && "$_ca" =~ ^[0-9]+$ ]] && { [[ "$_ru" != true ]] || [[ "$reuse" == 1 ]]; } \
          && { (( _ca >= wait_start )) || { (( req_epoch > 0 )) && (( _ca >= req_epoch )); }; }; then
         alog "calibração full de $id: checksum já calibrado (pedido satisfeito) — pulando duplicata"
         exit 0
@@ -523,8 +526,9 @@ ensure_cached() {
       (( _rt == 0 )) || alog "report_tl falhou $id (rc $_rt)"
       (( _rt == 3 )) || report_calib_log "$id" "$sc" "$cdir/.calib.log" "$cdir/pkg"
       jq -cn --arg id "$id" --arg c "$sc" --argjson now "$EPOCHSECONDS" --argjson rt "$_rt" \
-         --argjson fl "$( [[ "$full" == 1 ]] && echo true || echo false )" \
-         '{id:$id, checksum:$c, tl_reported:($rt == 0), calibrated_at:$now, reported_at:(if $rt == 0 then $now else null end), full:$fl}' > "$meta"
+         --argjson fl "$( [[ "$full" == 1 ]] && echo true || echo false )" --argjson ru "$( [[ "$_reuse" == 1 ]] && echo true || echo false )" \
+         '{id:$id, checksum:$c, tl_reported:($rt == 0), calibrated_at:$now, reported_at:(if $rt == 0 then $now else null end), full:$fl}
+          + (if $ru then {reuse:true} else {} end)' > "$meta"
       alog "cacheado+calibrado $id (cks=${sc:0:8}; teto ${_ccap}s)"
     fi
   ) 9>"$cdir.lock"
