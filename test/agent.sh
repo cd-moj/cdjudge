@@ -400,7 +400,7 @@ out="$(ensure_cached "o#memo" 1 1 0)"; DBG="$(cat "$CAL_LOG")"
 ck "full SEM o pedido: grava o memo, não reaproveita (padrão desligado)" 'grep -qx "calib memo=$CM/calib-memo reuse=0 only_good=n" "$CAL_LOG"'
 rm -f "$CM/pkg/tl.t1"; printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"
 out="$(ensure_cached "o#memo" 0 0 0 "" 1)"; DBG="$(cat "$CAL_LOG")"
-ck "calibração rápida (1º envio) nunca reaproveita" 'grep -qx "calib memo=$CM/calib-memo reuse=0 only_good=1" "$CAL_LOG"'
+ck "calibração rápida (1º envio): sem memo e sem reuse" 'grep -qx "calib memo=SEM reuse=0 only_good=1" "$CAL_LOG"'
 # "rodar tudo" pedido ENQUANTO a ♻ rodava (pedido mais velho que o fim dela): a ♻ não o satisfaz — roda; outra ♻, sim
 printf '{"id":"o#memo","checksum":"cks1"}' > "$CM/.moj-cache.json"; : > "$CAL_LOG"; _t0="$EPOCHSECONDS"
 out="$(ensure_cached "o#memo" 1 1 0 "" 1)"

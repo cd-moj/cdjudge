@@ -94,8 +94,8 @@ multi-repo: ver `../CLAUDE.md`. Uma máquina de juiz clona `judge` + `mojtools` 
     (o arquivo é `source`ado). Sem classe, servidor antigo ou checksum diferente: a tabela local.
   - **Calibração INCREMENTAL (10/11/2026, opt-in)**: o update/comando `calibrate` pode trazer `reuse:true`;
     `run_update`/`run_command` o passam ao `ensure_cached` (6º arg), que roda o calibreitor com
-    `MOJ_CALIB_MEMO_DIR="$cdir/calib-memo"` SEMPRE e `MOJ_CALIB_REUSE=1` só com o pedido e na full (a rápida nunca
-    reaproveita). O meta grava `reuse:true` da full ♻, e o "calibra 1× por máquina" NÃO deixa uma ♻ satisfazer um pedido
+    `MOJ_CALIB_MEMO_DIR="$cdir/calib-memo"` na FULL (a rápida do 1º envio nem grava: o hash do contexto lê os testes) e
+    `MOJ_CALIB_REUSE=1` só com o pedido. O meta grava `reuse:true` da full ♻, e o "calibra 1× por máquina" NÃO deixa uma ♻ satisfazer um pedido
     de rodar tudo (o autor clicou "Calibrar" sem ♻ enquanto ela rodava): só outra ♻ é pulada por ela. O GC
     (`_gc_stub_one`) apaga o `calib-memo/` junto com o `pkg/`. Teste em `test/agent.sh`.
   - **Calibração reportada por extenso**: `report_calib_log` envia, além do log/reports (TODOS os report.html

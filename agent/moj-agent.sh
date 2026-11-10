@@ -499,7 +499,7 @@ ensure_cached() {
       # depois de recalibrar). O calibreitor novo também tira a variável; aqui vale p/ o mojtools antigo.
       # MOJ_CALIB_LANES: o interruptor das raias do calibreitor (os grupos do MOJ_CPU_GROUPS viram raias; a
       # calibração disparada por um job usa os grupos dele) — AGENT_CALIB_LANES=0 desliga também aqui
-      # CALIBRAÇÃO INCREMENTAL (10/11/2026, opt-in): o calibreitor SEMPRE grava o retrato de cada solução em
+      # CALIBRAÇÃO INCREMENTAL (10/11/2026, opt-in): a calibração COMPLETA sempre grava o retrato de cada solução em
       # <cache>/<id>/calib-memo (fora do pkg/, que é trocado a cada versão; o GC o apaga junto com o pkg/) e só
       # REAPROVEITA com o pedido `reuse` (MOJ_CALIB_REUSE=1): a solução cuja chave não mudou não roda de novo.
       # mojtools antigo ignora as duas variáveis.
@@ -509,8 +509,10 @@ ensure_cached() {
           MOJ_CALIB_MEMO_DIR="$cdir/calib-memo" MOJ_CALIB_REUSE="$_reuse" \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       else
-        env -u MOJ_RELEASE_FILE MOJ_PROBLEM_ID="$id" MOJ_CALIB_LANES="${AGENT_CALIB_LANES:-1}" CALIBRATE_ONLY_GOOD=1 \
-          MOJ_CALIB_MEMO_DIR="$cdir/calib-memo" MOJ_CALIB_REUSE=0 \
+        # a RÁPIDA (1º envio, só as good) não grava memo: o hash do contexto lê os testes inteiros e atrasaria o envio
+        # que está esperando (revisão de 10/11/2026)
+        env -u MOJ_RELEASE_FILE -u MOJ_CALIB_MEMO_DIR MOJ_PROBLEM_ID="$id" MOJ_CALIB_LANES="${AGENT_CALIB_LANES:-1}" CALIBRATE_ONLY_GOOD=1 \
+          MOJ_CALIB_REUSE=0 \
           bash "$MOJTOOLS_DIR/calibreitor.sh" "$cdir/pkg" >"$cdir/.calib.log" 2>&1
       fi
       _crc=$?
